@@ -1,0 +1,20 @@
+idf_component_register(
+    SRCS
+        "main.cc"
+        "network_portal.cc"
+        "runtime_config.cc"
+        "config_validation.cc"
+    INCLUDE_DIRS "."
+    REQUIRES
+        app_update
+        esp_event
+        esp_http_client
+        esp_http_server
+        esp_lcd
+        esp_timer
+        esp_wifi
+        driver
+        json
+        mbedtls
+        nvs_flash
+)

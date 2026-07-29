@@ -1,0 +1,94 @@
+name: Bug report
+description: Report a reproducible defect with sanitized evidence.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. **Do not include credentials, feed tokens, account
+        values, unique device identifiers, private hosts/addresses, Wi-Fi details,
+        or uncropped screenshots.** Report vulnerabilities privately under
+        `SECURITY.md`, not here.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Bridge
+        - Firmware
+        - Container/deployment
+        - Documentation/tooling
+        - Unsure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: hardware
+    attributes:
+      label: Hardware revision
+      description: Do not provide a serial number or hardware address.
+      options:
+        - V1 (SH8601 / FT5x06 family)
+        - V2 (CO5300 / CST816S-CST820 family)
+        - Not hardware-specific
+        - Unknown
+    validations:
+      required: true
+
+  - type: input
+    id: revision
+    attributes:
+      label: Software revision
+      description: Release version or source commit; do not paste local paths.
+      placeholder: v0.x.y or short commit identifier
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: List the shortest deterministic steps using synthetic data.
+      placeholder: |
+        1. Start the bridge with the mock feed...
+        2. Build the V2 placeholder variant...
+        3. Observe...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Use only sanitized status/error categories.
+    validations:
+      required: true
+
+  - type: textarea
+    id: validation
+    attributes:
+      label: Checks already attempted
+      description: Include preflight/test names, not secrets or full payloads.
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: I removed credentials, tokens, account values, and personal infrastructure.
+          required: true
+        - label: I scanned every attachment with `scripts/scan_public_safety.py`.
+          required: true
+        - label: This is not a vulnerability report.
+          required: true
+

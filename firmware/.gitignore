@@ -1,0 +1,19 @@
+# ESP-IDF generated state. Never publish binaries: NVS may contain credentials.
+/build/
+/managed_components/
+/dependencies.lock
+/sdkconfig
+/sdkconfig.old
+*.bin
+*.elf
+*.map
+
+# Host tests
+/tests/.build/
+__pycache__/
+*.pyc
+
+# Local/editor files
+.DS_Store
+.vscode/
+.idea/

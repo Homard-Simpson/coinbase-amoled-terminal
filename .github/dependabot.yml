@@ -1,0 +1,70 @@
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Etc/UTC
+    labels:
+      - dependencies
+      - ci
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:15"
+      timezone: Etc/UTC
+    labels:
+      - dependencies
+      - python
+    open-pull-requests-limit: 5
+    groups:
+      python-development-tools:
+        dependency-type: development
+        update-types:
+          - minor
+          - patch
+    commit-message:
+      prefix: deps
+
+  - package-ecosystem: pip
+    directory: /bridge
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:30"
+      timezone: Etc/UTC
+    labels:
+      - dependencies
+      - bridge
+    open-pull-requests-limit: 5
+    groups:
+      bridge-runtime:
+        update-types:
+          - minor
+          - patch
+    commit-message:
+      prefix: deps
+
+  - package-ecosystem: docker
+    directory: /bridge
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:45"
+      timezone: Etc/UTC
+    labels:
+      - dependencies
+      - container
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: deps
+

@@ -1,0 +1,17 @@
+menu "Unofficial Coinbase AMOLED terminal"
+
+choice TERMINAL_BOARD_REVISION
+    prompt "Waveshare ESP32-S3 Touch AMOLED 1.8 revision"
+    default TERMINAL_BOARD_V2
+    help
+        Select the controller set fitted to the board. Flashing the wrong
+        variant can leave the display blank until the correct image is flashed.
+
+    config TERMINAL_BOARD_V1
+        bool "V1: SH8601 + FT5x06/FT3168 + AXP2101"
+
+    config TERMINAL_BOARD_V2
+        bool "V2: CO5300 + CST820"
+endchoice
+
+endmenu

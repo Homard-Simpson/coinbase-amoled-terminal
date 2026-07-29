@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/amoled-terminal-feed-v1.json",
+  "title": "Read-only AMOLED terminal bridge feed",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["read_only", "prices", "positions", "portfolio"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "read_only": {
+      "const": true,
+      "description": "The firmware rejects the entire response unless this value is the JSON boolean true."
+    },
+    "refresh_seconds": {"type": "integer", "minimum": 2, "maximum": 3600},
+    "price_history_seconds": {"type": "integer", "minimum": 2, "maximum": 3600},
+    "candle_interval_seconds": {"type": "integer", "minimum": 1, "maximum": 604800},
+    "prices": {
+      "type": "object",
+      "additionalProperties": {"type": "number", "exclusiveMinimum": 0, "maximum": 1000000000000000}
+    },
+    "price_history": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "maxItems": 60,
+        "items": {"type": "number", "exclusiveMinimum": 0, "maximum": 1000000000000000}
+      }
+    },
+    "candles": {
+      "type": "object",
+      "description": "Per-symbol OHLCV. Firmware sorts, de-duplicates, validates, and keeps only the newest 36 candles.",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "oneOf": [
+            {
+              "type": "array",
+              "prefixItems": [
+                {"type": "integer", "minimum": 1, "maximum": 32503680000000},
+                {"type": "number", "exclusiveMinimum": 0, "maximum": 1000000000000000},
+                {"type": "number", "exclusiveMinimum": 0, "maximum": 1000000000000000},
+                {"type": "number", "exclusiveMinimum": 0, "maximum": 1000000000000000},
+                {"type": "number", "exclusiveMinimum": 0, "maximum": 1000000000000000},
+                {"type": "number", "minimum": 0, "maximum": 1e30}
+              ],
+              "minItems": 6,
+              "maxItems": 6
+            },
+            {
+              "type": "object",
+              "required": ["timestamp", "open", "high", "low", "close", "volume"],
+              "properties": {
+                "timestamp": {"type": "integer", "minimum": 1, "maximum": 32503680000000},
+                "open": {"type": "number", "exclusiveMinimum": 0, "maximum": 1000000000000000},
+                "high": {"type": "number", "exclusiveMinimum": 0, "maximum": 1000000000000000},
+                "low": {"type": "number", "exclusiveMinimum": 0, "maximum": 1000000000000000},
+                "close": {"type": "number", "exclusiveMinimum": 0, "maximum": 1000000000000000},
+                "volume": {"type": "number", "minimum": 0, "maximum": 1e30}
+              }
+            }
+          ]
+        }
+      }
+    },
+    "positions": {
+      "type": "object",
+      "description": "Open positions only, keyed by symbol.",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["side", "entry", "pnl"],
+        "properties": {
+          "open": {"type": "boolean"},
+          "side": {"type": "string", "maxLength": 10},
+          "contracts": {"type": "number"},
+          "size": {"type": "number"},
+          "entry": {"type": "number"},
+          "pnl": {"type": "number"}
+        }
+      }
+    },
+    "portfolio": {
+      "type": "object",
+      "required": ["positions_value", "unrealized_pnl", "realized_pnl_today"],
+      "additionalProperties": false,
+      "properties": {
+        "positions_value": {"type": "number"},
+        "unrealized_pnl": {"type": "number"},
+        "realized_pnl_today": {"type": "number"}
+      }
+    },
+    "closed_today": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "required": ["symbol", "side", "pnl"],
+        "properties": {
+          "symbol": {"type": "string", "maxLength": 10},
+          "side": {"type": "string", "maxLength": 10},
+          "contracts": {"type": "number"},
+          "size": {"type": "number"},
+          "pnl": {"type": "number"}
+        }
+      }
+    }
+  }
+}

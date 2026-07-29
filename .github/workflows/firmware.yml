@@ -1,0 +1,57 @@
+name: ESP-IDF firmware
+
+on:
+  push:
+    paths:
+      - firmware/**
+      - scripts/build-firmware.sh
+      - .github/workflows/firmware.yml
+  pull_request:
+    paths:
+      - firmware/**
+      - scripts/build-firmware.sh
+      - .github/workflows/firmware.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.variant }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - v1
+          - v2
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build compile-only placeholder image
+        uses: espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5 # v1.2.0
+        with:
+          esp_idf_version: v5.5.2
+          target: esp32s3
+          path: .
+          command: ./scripts/build-firmware.sh ${{ matrix.variant }} --ci-placeholder
+
+      - name: Upload compile-only artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: firmware-${{ matrix.variant }}-compile-only-placeholder
+          path: |
+            firmware/build/${{ matrix.variant }}/*.bin
+            firmware/build/${{ matrix.variant }}/*.elf
+            firmware/build/${{ matrix.variant }}/bootloader/bootloader.bin
+            firmware/build/${{ matrix.variant }}/partition_table/partition-table.bin
+          if-no-files-found: error
+          retention-days: 7

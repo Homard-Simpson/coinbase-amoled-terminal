@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "read_only": false,
+  "prices": {},
+  "positions": {},
+  "portfolio": {"positions_value": 0, "unrealized_pnl": 0, "realized_pnl_today": 0}
+}

@@ -1,0 +1,69 @@
+name: Feature request
+description: Propose a focused read-only improvement.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The project is intentionally read-only and self-hosted. Requests for order
+        placement, trading, transfers, withdrawals, hosted credential custody, or
+        public anonymous feeds are out of scope.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem exists today? Do not include real account data.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe behavior and the smallest useful scope.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: true
+
+  - type: dropdown
+    id: hardware
+    attributes:
+      label: Hardware impact
+      options:
+        - None
+        - V1 only
+        - V2 only
+        - Both V1 and V2
+        - Unknown
+    validations:
+      required: true
+
+  - type: textarea
+    id: security
+    attributes:
+      label: Security and privacy impact
+      description: Consider credentials, feed scope, network exposure, logs, retention, and visible data.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Project boundaries
+      options:
+        - label: The proposal keeps Coinbase credentials on the local bridge.
+          required: true
+        - label: The proposal does not add trading/order/transfer functionality.
+          required: true
+        - label: The proposal does not require a project-operated cloud service.
+          required: true
+

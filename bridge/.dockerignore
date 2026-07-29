@@ -1,0 +1,16 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+build
+dist
+data
+secrets
+*.pem
+*.key
+*.token
+*.log
+tests

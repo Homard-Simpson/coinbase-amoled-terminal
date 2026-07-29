@@ -1,0 +1,52 @@
+name: coinbase-amoled-terminal
+
+services:
+  bridge:
+    build:
+      context: ./bridge
+      dockerfile: Dockerfile
+    environment:
+      BRIDGE_LOG_LEVEL: ${BRIDGE_LOG_LEVEL:-INFO}
+    # Run setup once before the first `up` to create /data/config.json, store
+    # credentials, and add a device:
+    #   docker compose run --rm bridge setup            # live (view-only key)
+    #   docker compose run --rm bridge setup --sample   # offline sample mode
+    command:
+      - serve
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8788"
+      - --allow-insecure-public-bind
+    volumes:
+      - type: bind
+        source: ${DATA_DIR:-./data}
+        target: /data
+      - type: bind
+        source: ${SECRETS_DIR:-./secrets}
+        target: /run/secrets
+        read_only: true
+    ports:
+      - 127.0.0.1:${BRIDGE_PORT:-8788}:8788
+    read_only: true
+    init: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 100
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8788/healthz', timeout=2)
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s

@@ -1,0 +1,7 @@
+"""Read-only bridge for an unofficial Coinbase AMOLED terminal."""
+
+from __future__ import annotations
+
+__all__ = ["__version__"]
+
+__version__ = "1.0.0"

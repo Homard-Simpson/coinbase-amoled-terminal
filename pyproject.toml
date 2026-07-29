@@ -1,0 +1,32 @@
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+minversion = "8.0"
+# The bridge is a self-contained package with its own tests and pytest config;
+# it is exercised by a separate `pytest bridge` invocation (see scripts/preflight
+# .sh and .github/workflows/python.yml) so the two `tests` packages never clash.
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [
+  "firmware/build",
+  "firmware/managed_components",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "S", "UP", "W"]
+ignore = [
+  "S101", # Assertions are appropriate in tests.
+  "S603", # Subprocess calls use fixed local developer-tool arguments.
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "S105", "S106"]
+"bridge/tests/**/*.py" = ["S101", "S105", "S106"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+

@@ -1,0 +1,59 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+secrets/
+credentials/
+data/
+*.pem
+*.key
+*.p12
+*.pfx
+*.token
+feed_config.h
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# ESP-IDF and generated firmware
+firmware/build/
+firmware/build-*/
+firmware/managed_components/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/main/feed_config.h
+*.bin
+*.elf
+*.map
+*.uf2
+
+# Build and runtime output
+build/
+dist/
+artifacts/
+out/
+logs/
+*.log
+*.pid
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Editors and operating systems
+.DS_Store
+._*
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+

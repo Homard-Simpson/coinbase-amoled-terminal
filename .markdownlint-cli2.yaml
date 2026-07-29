@@ -1,0 +1,13 @@
+config:
+  default: true
+  MD013:
+    line_length: 120
+    code_blocks: false
+    tables: false
+    headings: false
+
+globs:
+  - "**/*.md"
+  - "!firmware/build/**"
+  - "!firmware/managed_components/**"
+

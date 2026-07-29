@@ -1,0 +1,62 @@
+name: Python quality
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.11"
+          - "3.14"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install development tools
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+
+      - name: Install bridge dependencies when declared
+        run: |
+          if [[ -f bridge/requirements.txt ]]; then
+            python -m pip install --disable-pip-version-check -r bridge/requirements.txt
+          elif [[ -f bridge/pyproject.toml ]]; then
+            python -m pip install --disable-pip-version-check ./bridge
+          fi
+
+      - name: Check shell syntax
+        run: bash -n scripts/*.sh
+
+      - name: Lint
+        run: python -m ruff check bridge scripts tests
+
+      - name: Check formatting
+        run: python -m ruff format --check bridge scripts tests
+
+      - name: Test repository
+        run: python -m pytest -q
+
+      - name: Test bridge
+        run: python -m pytest -q bridge
