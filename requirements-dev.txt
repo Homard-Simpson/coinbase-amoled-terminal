@@ -1,6 +1,6 @@
 pip-audit>=2.9.0,<3.0.0
 pytest>=8.4.0,<10.0.0
-ruff>=0.12.0,<1.0.0
+ruff>=0.16.0,<1.0.0
 
 # Bridge runtime dependency, needed so the bridge test suite imports under the
 # repository-wide pytest run.
