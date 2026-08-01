@@ -19,7 +19,6 @@ import threading
 import time
 import urllib.error
 import urllib.request
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from http import HTTPStatus
@@ -34,12 +33,19 @@ from .auth import (
     DeviceManager,
     DeviceProvision,
     JWTSigner,
+    generate_device_id,
+    generate_device_token,
     save_local_credentials_atomic,
     write_secret_atomic,
 )
 from .coinbase import CoinbaseClient
 from .config import ConfigStore
-from .errors import CredentialError, ProvisioningError, SetupSessionError
+from .errors import (
+    CoinbaseAPIError,
+    CredentialError,
+    ProvisioningError,
+    SetupSessionError,
+)
 from .quickstart import MAX_CDP_JSON_BYTES, parse_cdp_key_json
 from .user_service import (
     ServiceStartResult,
@@ -55,6 +61,9 @@ FINISH_PATH = "/v1/onboarding/finish"
 MAX_HEADER_BYTES = 16_384
 MAX_REQUEST_TARGET = 512
 GENERIC_ERROR = {"ok": False, "error": "Setup could not be completed."}
+RETRYABLE_PERMISSION_CODES = frozenset(
+    {"upstream_unreachable", "upstream_rate_limited", "upstream_server_error"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,13 +215,10 @@ ReadinessChecker = Callable[[], bool]
 
 
 @dataclass(slots=True)
-class _PendingSetup:
-    config_existed: bool
-    original_config: dict[str, Any] | None
-    bundle_path: Path
-    old_bundle: bytes | None
-    provision: DeviceProvision
-    service: ServiceStartResult
+class _StagedSetup:
+    credentials: Credentials = field(repr=False)
+    provisioning: SafeProvisioning
+    permission_verified: bool
 
 
 def _check_permissions(credentials: Credentials) -> None:
@@ -264,17 +270,78 @@ class OnboardingCoordinator:
         self.permission_checker = permission_checker
         self.service_starter = service_starter
         self.readiness_checker = readiness_checker
-        self._pending: _PendingSetup | None = None
+        self._staged: _StagedSetup | None = None
         self._transaction_lock = threading.Lock()
 
     def complete(self, credentials: Credentials) -> SafeProvisioning:
-        # Coinbase validation happens before the first persistent write.
-        self.permission_checker(credentials)
+        """Stage credentials in memory and return only safe ESP values.
+
+        A Wi-Fi-only computer usually loses internet while joined to the display
+        access point. We therefore try the permission check here, but defer only
+        transient network/server failures until the display has saved Wi-Fi and
+        the computer reconnects. Nothing persistent is written at this stage.
+        """
+
+        permission_verified = False
+        try:
+            self.permission_checker(credentials)
+            permission_verified = True
+        except CoinbaseAPIError as exc:
+            if exc.code not in RETRYABLE_PERMISSION_CODES:
+                raise
+
+        provisioning = SafeProvisioning(
+            bridge_url=self.bridge_url,
+            device_id=generate_device_id(),
+            feed_token=generate_device_token(),
+        )
 
         with self._transaction_lock:
-            if self._pending is not None:
+            if self._staged is not None:
                 raise ProvisioningError("a setup transaction is already pending")
+            self._staged = _StagedSetup(
+                credentials=credentials,
+                provisioning=provisioning,
+                permission_verified=permission_verified,
+            )
+        return provisioning
 
+    def finalize_pending(
+        self,
+        *,
+        timeout_seconds: float = 120.0,
+        retry_interval: float = 1.0,
+    ) -> SafeProvisioning:
+        """Verify permissions, persist state, and start the bridge after ESP save."""
+
+        if timeout_seconds < 0 or retry_interval < 0:
+            raise ValueError("finalization timing must be non-negative")
+        with self._transaction_lock:
+            staged = self._staged
+        if staged is None:
+            raise ProvisioningError("no setup transaction is pending")
+
+        if not staged.permission_verified:
+            deadline = time.monotonic() + timeout_seconds
+            while True:
+                try:
+                    self.permission_checker(staged.credentials)
+                    staged.permission_verified = True
+                    break
+                except CoinbaseAPIError as exc:
+                    if exc.code not in RETRYABLE_PERMISSION_CODES:
+                        raise
+                    if time.monotonic() >= deadline:
+                        raise ProvisioningError(
+                            "Coinbase permission check could not reach the internet"
+                        ) from exc
+                    time.sleep(
+                        min(retry_interval, max(0.0, deadline - time.monotonic()))
+                    )
+
+        with self._transaction_lock:
+            if self._staged is not staged:
+                raise ProvisioningError("setup transaction changed unexpectedly")
             config_existed = self.store.exists()
             original_config = self.store.load() if config_existed else None
             bundle_path = self.store.data_dir / "secrets" / "coinbase_credentials"
@@ -285,35 +352,26 @@ class OnboardingCoordinator:
             try:
                 save_local_credentials_atomic(
                     self.store.data_dir,
-                    credentials=credentials,
+                    credentials=staged.credentials,
                     replace=bundle_path.exists(),
                 )
                 self.store.initialize()
                 provision = DeviceManager(self.store).add(
-                    device_id=str(uuid.uuid4()),
+                    device_id=staged.provisioning.device_id,
                     label="USB-onboarded AMOLED terminal",
+                    token=staged.provisioning.feed_token,
                 )
                 token = provision.token_path.read_text(encoding="ascii").strip()
-                if not DEVICE_TOKEN_RE.fullmatch(token):
+                if not DEVICE_TOKEN_RE.fullmatch(token) or not hmac.compare_digest(
+                    token, staged.provisioning.feed_token
+                ):
                     raise ProvisioningError("device provisioning failed")
 
                 service = self.service_starter()
                 if not service.started or not self.readiness_checker():
                     raise ProvisioningError("bridge service did not become ready")
-                assert provision is not None
-                self._pending = _PendingSetup(
-                    config_existed=config_existed,
-                    original_config=original_config,
-                    bundle_path=bundle_path,
-                    old_bundle=old_bundle,
-                    provision=provision,
-                    service=service,
-                )
-                return SafeProvisioning(
-                    bridge_url=self.bridge_url,
-                    device_id=provision.device_id,
-                    feed_token=token,
-                )
+                self._staged = None
+                return staged.provisioning
             except BaseException:
                 self._restore(
                     config_existed=config_existed,
@@ -323,28 +381,13 @@ class OnboardingCoordinator:
                     provision=provision,
                     service=service,
                 )
+                self._staged = None
                 raise
 
-    def commit_pending(self) -> None:
-        """Make a successful browser-to-ESP save final."""
-        with self._transaction_lock:
-            self._pending = None
-
     def rollback_pending(self) -> None:
-        """Restore pre-setup state after expiry, cancellation, or failed ESP save."""
+        """Forget in-memory credentials after expiry or failed ESP save."""
         with self._transaction_lock:
-            pending = self._pending
-            if pending is None:
-                return
-            self._restore(
-                config_existed=pending.config_existed,
-                original_config=pending.original_config,
-                bundle_path=pending.bundle_path,
-                old_bundle=pending.old_bundle,
-                provision=pending.provision,
-                service=pending.service,
-            )
-            self._pending = None
+            self._staged = None
 
     def _restore(
         self,
@@ -588,9 +631,6 @@ class OnboardingRequestHandler(BaseHTTPRequestHandler):
             return
         try:
             self.app.session.finish_once(setup_token=token)
-            commit = getattr(self.app.coordinator, "commit_pending", None)
-            if commit is not None:
-                commit()
         except SetupSessionError:
             self._send_json(HTTPStatus.GONE, GENERIC_ERROR, origin=origin)
             return

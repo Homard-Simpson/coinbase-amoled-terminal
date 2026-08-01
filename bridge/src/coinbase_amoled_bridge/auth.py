@@ -388,6 +388,7 @@ class DeviceManager:
         device_id: str | None = None,
         label: str = "",
         token_path: str | os.PathLike[str] | None = None,
+        token: str | None = None,
     ) -> DeviceProvision:
         candidate = validate_device_id(device_id or generate_device_id())
         try:
@@ -400,8 +401,10 @@ class DeviceManager:
             else self._default_token_path(candidate)
         )
         self._validate_token_destination(destination)
-        token = generate_device_token()
-        digest = token_digest(token)
+        issued_token = generate_device_token() if token is None else token
+        if not DEVICE_TOKEN_RE.fullmatch(issued_token):
+            raise CredentialError("device token is invalid")
+        digest = token_digest(issued_token)
         if destination.exists():
             raise CredentialError("device token destination already exists")
 
@@ -421,7 +424,7 @@ class DeviceManager:
 
         # The token is written first; on config failure it is removed. The raw
         # token is never returned or printed by this API.
-        write_secret_atomic(destination, (token + "\n").encode("ascii"))
+        write_secret_atomic(destination, (issued_token + "\n").encode("ascii"))
         try:
             self.store.update(mutate)
         except BaseException:
@@ -431,7 +434,7 @@ class DeviceManager:
                 pass
             raise
         finally:
-            token = ""  # Minimize lifetime; Python does not promise zeroization.
+            issued_token = ""  # Python does not promise zeroization.
         return DeviceProvision(device_id=candidate, token_path=destination)
 
     def rotate(

@@ -161,6 +161,7 @@ def main() -> int:
         daemon=True,
     )
     server_thread.start()
+    finalized = False
 
     try:
         with tempfile.TemporaryDirectory(prefix="cbat-firmware-") as temporary_name:
@@ -192,6 +193,12 @@ def main() -> int:
         timeout = max(0.0, session.monotonic_deadline - time.monotonic())
         session.finished_event.wait(timeout=timeout)
         if session.finished_event.is_set():
+            print("The display saved its setup. Waiting for this computer to get back online…")
+            try:
+                coordinator.finalize_pending(timeout_seconds=180.0)
+            except Exception as exc:
+                raise FirmwareInstallError(str(exc)) from None
+            finalized = True
             print("Setup complete. The key stayed on this computer; the display is restarting.")
             return 0
         if session.provisioned_event.is_set():
@@ -203,7 +210,7 @@ def main() -> int:
         server.shutdown()
         server.server_close()
         server_thread.join(timeout=2.0)
-        if not session.finished_event.is_set():
+        if not finalized:
             try:
                 coordinator.rollback_pending()
             except ProvisioningError as exc:

@@ -316,11 +316,7 @@ def require_release_readiness(
     allow_unverified_test_artifacts: bool,
 ) -> None:
     variant = manifest.variants[board]
-    if (
-        variant.ready_for_production
-        and variant.controls_verified
-        and variant.hardware_attested
-    ):
+    if variant.ready_for_production and variant.controls_verified and variant.hardware_attested:
         return
     if allow_unverified_test_artifacts:
         return
@@ -435,8 +431,7 @@ def _validate_application_image(payload: bytes, variant: VariantManifest) -> Non
     if (
         len(payload) < ESP_APP_IDF_OFFSET + ESP_APP_FIELD_BYTES
         or payload[0] != ESP_IMAGE_MAGIC
-        or struct.unpack_from("<I", payload, ESP_APP_DESC_OFFSET)[0]
-        != ESP_APP_DESC_MAGIC
+        or struct.unpack_from("<I", payload, ESP_APP_DESC_OFFSET)[0] != ESP_APP_DESC_MAGIC
     ):
         raise FirmwareInstallError("firmware application image is invalid")
     if (

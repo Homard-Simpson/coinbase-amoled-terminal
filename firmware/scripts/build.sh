@@ -23,6 +23,7 @@ RELEASE_VERSION="${RELEASE_VERSION#v}"
 }
 PROJECT_VERSION="$RELEASE_VERSION-$VARIANT"
 mkdir -p "$BUILD_DIR"
+cd "$ROOT"
 
 echo "Building $VARIANT with ESP-IDF 5.5.2 -> $BUILD_DIR"
 if [[ ! -f "$SDKCONFIG_FILE" ]]; then

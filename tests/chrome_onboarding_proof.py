@@ -5,7 +5,10 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
+import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -55,9 +58,9 @@ class FakeEspState:
 class FakeEspServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, state: FakeEspState) -> None:
+    def __init__(self, state: FakeEspState, host: str) -> None:
         self.state = state
-        super().__init__(("127.0.0.1", 0), FakeEspHandler)
+        super().__init__((host, 0), FakeEspHandler)
 
 
 class FakeEspHandler(BaseHTTPRequestHandler):
@@ -144,10 +147,39 @@ const headers={{'Authorization':'Setup '+setupToken,'Content-Type':'application/
 </script>""".encode()
 
 
-def run(chrome: Path) -> dict[str, Any]:
+def private_portal_host() -> str:
+    override = os.environ.get("CBAT_CHROME_PROOF_PORTAL_IP", "").strip()
+    candidates = [override] if override else []
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as connection:
+            connection.connect(("192.0.2.1", 9))
+            candidates.append(str(connection.getsockname()[0]))
+    except OSError:
+        pass
+    try:
+        candidates.extend(socket.gethostbyname_ex(socket.gethostname())[2])
+    except OSError:
+        pass
+    for value in candidates:
+        try:
+            address = ipaddress.ip_address(value)
+        except ValueError:
+            continue
+        if (
+            isinstance(address, ipaddress.IPv4Address)
+            and address.is_private
+            and not address.is_loopback
+            and not address.is_link_local
+        ):
+            return str(address)
+    raise RuntimeError("no private LAN address is available for the Chrome proof")
+
+
+def run(chrome: Path, *, portal_host: str | None = None) -> dict[str, Any]:
     state = FakeEspState()
-    esp = FakeEspServer(state)
-    esp_origin = f"http://127.0.0.1:{esp.server_address[1]}"
+    selected_host = portal_host or private_portal_host()
+    esp = FakeEspServer(state, selected_host)
+    esp_origin = f"http://{selected_host}:{esp.server_address[1]}"
     coordinator = ProofCoordinator()
     onboarding = create_onboarding_server(
         coordinator,
@@ -211,6 +243,8 @@ def run(chrome: Path) -> dict[str, Any]:
         return {
             "chrome": chrome.name,
             "cross_origin_onboarding": True,
+            "portal_address_space": "private",
+            "portal_host": selected_host,
             "p256_json_parsed": coordinator.calls == 1,
             "esp_payload_fields": sorted(decoded),
             "credential_in_esp_payload": False,
@@ -228,10 +262,11 @@ def run(chrome: Path) -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--chrome", type=Path, default=DEFAULT_CHROME)
+    parser.add_argument("--portal-host")
     args = parser.parse_args()
     if not args.chrome.is_file():
         parser.error("Google Chrome was not found")
-    print(json.dumps(run(args.chrome), indent=2, sort_keys=True))
+    print(json.dumps(run(args.chrome, portal_host=args.portal_host), indent=2, sort_keys=True))
     return 0
 
 

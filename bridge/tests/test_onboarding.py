@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from coinbase_amoled_bridge.auth import Credentials
 from coinbase_amoled_bridge.config import ConfigStore
 from coinbase_amoled_bridge.errors import (
+    CoinbaseAPIError,
     ProvisioningError,
     SetupSessionError,
     UnsafeCredentialError,
@@ -150,6 +151,7 @@ class SetupSessionTests(unittest.TestCase):
         with self.assertRaises(SetupSessionError):
             first.begin_once()
         first.finish_once(setup_token=first._finish_token)
+        first.mark_finished()
         self.assertTrue(first.finished_event.is_set())
 
         expired = SetupSession.create(ttl_seconds=60)
@@ -258,7 +260,7 @@ class OnboardingHTTPTests(unittest.TestCase):
             "POST", FINISH_PATH, body=b"", headers=finish_headers
         )
         self.assertEqual(status, 200)
-        self.assertEqual(self.coordinator.commits, 1)
+        self.assertTrue(self.running.session.finished_event.is_set())
         status, _, _ = self.running.request(
             "POST", FINISH_PATH, body=b"", headers=finish_headers
         )
@@ -365,6 +367,8 @@ class CoordinatorTransactionTests(unittest.TestCase):
                 readiness_checker=mock.Mock(return_value=True),
             )
             result = coordinator.complete(credentials)
+            self.assertFalse(Path(temporary, "config.json").exists())
+            coordinator.finalize_pending()
             bundle = Path(temporary, "secrets", "coinbase_credentials")
             mode = stat.S_IMODE(os.stat(bundle).st_mode)
             loaded = Credentials.load_local(temporary)
@@ -392,8 +396,9 @@ class CoordinatorTransactionTests(unittest.TestCase):
                 ),
                 readiness_checker=mock.Mock(return_value=False),
             )
+            coordinator.complete(credentials)
             with self.assertRaises(ProvisioningError):
-                coordinator.complete(credentials)
+                coordinator.finalize_pending()
             self.assertFalse(Path(temporary, "config.json").exists())
             self.assertFalse(Path(temporary, "secrets").exists())
 
@@ -414,10 +419,36 @@ class CoordinatorTransactionTests(unittest.TestCase):
                 readiness_checker=mock.Mock(return_value=True),
             )
             coordinator.complete(credentials)
-            self.assertTrue(Path(temporary, "config.json").exists())
+            self.assertFalse(Path(temporary, "config.json").exists())
             coordinator.rollback_pending()
             self.assertFalse(Path(temporary, "config.json").exists())
             self.assertFalse(Path(temporary, "secrets").exists())
+
+    def test_offline_portal_defers_permission_check_until_network_returns(self) -> None:
+        credentials = Credentials.from_values(
+            key_name="organizations/example/apiKeys/deferred",
+            private_key_pem=_pem(),
+            source="test",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            permission = mock.Mock(
+                side_effect=[CoinbaseAPIError("upstream_unreachable"), None]
+            )
+            coordinator = OnboardingCoordinator(
+                temporary,
+                bridge_url="http://100.100.20.10:8788/v1/device-feed",
+                permission_checker=permission,
+                service_starter=mock.Mock(
+                    return_value=ServiceStartResult("started", "none")
+                ),
+                readiness_checker=mock.Mock(return_value=True),
+            )
+            coordinator.complete(credentials)
+            self.assertFalse(Path(temporary, "config.json").exists())
+            self.assertFalse(Path(temporary, "secrets").exists())
+            coordinator.finalize_pending(timeout_seconds=1, retry_interval=0)
+            self.assertTrue(Path(temporary, "config.json").exists())
+            self.assertEqual(permission.call_count, 2)
 
 
 def _pem() -> bytes:
