@@ -104,6 +104,7 @@ class FirmwareManifest:
 class SetupMetadata:
     session_id: str
     setup_token: str
+    completion_token: str
     csrf_token: str
     endpoint_url: str
     local_page_url: str
@@ -447,13 +448,19 @@ def build_setup_partition(metadata: SetupMetadata) -> bytes:
         "schema_version": 1,
         "session_id": metadata.session_id,
         "setup_token": metadata.setup_token,
+        "completion_token": metadata.completion_token,
         "csrf_token": metadata.csrf_token,
         "endpoint_url": metadata.endpoint_url,
         "local_page_url": metadata.local_page_url,
         "bridge_url": metadata.bridge_url,
         "expires_at": metadata.expires_at,
     }
-    for name in ("session_id", "setup_token", "csrf_token"):
+    for name in (
+        "session_id",
+        "setup_token",
+        "completion_token",
+        "csrf_token",
+    ):
         value = payload_value[name]
         if (
             not isinstance(value, str)

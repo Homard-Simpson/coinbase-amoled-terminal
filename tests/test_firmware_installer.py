@@ -232,6 +232,7 @@ class UsbProvisioningTests(unittest.TestCase):
         return FIRMWARE.SetupMetadata(
             session_id="session_abcdefghijklmnop",
             setup_token="A" * 43,
+            completion_token="C" * 43,
             csrf_token="B" * 43,
             endpoint_url="http://127.0.0.1:43123/v1/onboarding",
             local_page_url=("http://127.0.0.1:43123/setup/session_abcdefghijklmnop"),
@@ -244,6 +245,7 @@ class UsbProvisioningTests(unittest.TestCase):
         parsed = FIRMWARE.parse_setup_partition(image)
         self.assertEqual(len(image), FIRMWARE.ONBOARDING_SIZE)
         self.assertEqual(parsed["session_id"], "session_abcdefghijklmnop")
+        self.assertEqual(parsed["completion_token"], "C" * 43)
         lower = image.lower()
         for marker in FIRMWARE.FORBIDDEN_ESP_MARKERS:
             self.assertNotIn(marker.lower(), lower)

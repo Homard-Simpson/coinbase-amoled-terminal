@@ -175,6 +175,7 @@ def main() -> int:
             metadata = SetupMetadata(
                 session_id=session.session_id,
                 setup_token=session.setup_token,
+                completion_token=session.completion_token,
                 csrf_token=session.csrf_token,
                 endpoint_url=session.endpoint_url,
                 local_page_url=session.local_page_url,
@@ -191,16 +192,15 @@ def main() -> int:
         print("If the captive window blocks localhost, use its same-computer fallback link.")
 
         timeout = max(0.0, session.monotonic_deadline - time.monotonic())
-        session.finished_event.wait(timeout=timeout)
+        session.terminal_event.wait(timeout=timeout)
         if session.finished_event.is_set():
-            print("The display saved its setup. Waiting for this computer to get back online…")
-            try:
-                coordinator.finalize_pending(timeout_seconds=180.0)
-            except Exception as exc:
-                raise FirmwareInstallError(str(exc)) from None
             finalized = True
             print("Setup complete. The key stayed on this computer; the display is restarting.")
             return 0
+        if session.failed_event.is_set():
+            raise FirmwareInstallError(
+                "the display saved setup, but the local transaction failed closed"
+            )
         if session.provisioned_event.is_set():
             raise FirmwareInstallError(
                 "the bridge is ready, but the display did not confirm its final save"
@@ -217,6 +217,10 @@ def main() -> int:
                 raise FirmwareInstallError(
                     "incomplete local setup could not be rolled back"
                 ) from exc
+            finally:
+                coordinator.close()
+        else:
+            coordinator.close()
 
 
 if __name__ == "__main__":

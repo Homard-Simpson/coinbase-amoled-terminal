@@ -16,7 +16,11 @@ from coinbase_amoled_bridge.auth import (
     DeviceManager,
     DeviceRegistry,
     JWTSigner,
+    active_local_credential_slot,
+    compare_and_swap_local_credential_slot,
+    remove_local_credential_slot,
     save_local_credentials,
+    stage_local_credential_slot,
 )
 from coinbase_amoled_bridge.config import ConfigStore
 from coinbase_amoled_bridge.errors import CredentialError, ReadOnlyViolation
@@ -119,6 +123,48 @@ class JWTTests(unittest.TestCase):
                         "COINBASE_API_PRIVATE_KEY_FILE": str(private_key),
                     },
                 )
+
+    def test_versioned_credential_slot_switch_is_scoped_and_atomic(self) -> None:
+        credentials, _ = make_credentials()
+        slot = "onboarding_txn_" + ("A" * 24) + ".bundle"
+        with tempfile.TemporaryDirectory() as temporary:
+            path = stage_local_credential_slot(
+                temporary,
+                credentials=credentials,
+                slot_name=slot,
+            )
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertIsNone(active_local_credential_slot(temporary))
+            self.assertTrue(
+                compare_and_swap_local_credential_slot(
+                    temporary,
+                    expected=None,
+                    replacement=slot,
+                )
+            )
+            self.assertEqual(active_local_credential_slot(temporary), slot)
+            self.assertEqual(
+                Credentials.load_local(temporary).key_name,
+                credentials.key_name,
+            )
+            self.assertFalse(
+                compare_and_swap_local_credential_slot(
+                    temporary,
+                    expected=None,
+                    replacement=slot,
+                )
+            )
+            with self.assertRaises(CredentialError):
+                remove_local_credential_slot(temporary, slot)
+            self.assertTrue(
+                compare_and_swap_local_credential_slot(
+                    temporary,
+                    expected=slot,
+                    replacement=None,
+                )
+            )
+            remove_local_credential_slot(temporary, slot)
+            self.assertFalse(path.exists())
 
 
 class DeviceAuthTests(unittest.TestCase):

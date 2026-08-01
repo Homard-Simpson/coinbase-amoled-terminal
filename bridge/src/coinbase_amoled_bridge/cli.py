@@ -276,9 +276,10 @@ class _QuickstartChanges:
 def _local_credentials_if_present(store: ConfigStore) -> Credentials | None:
     secrets_dir = store.data_dir / "secrets"
     bundle_path = secrets_dir / "coinbase_credentials"
+    active_path = secrets_dir / "coinbase_credentials.active"
     name_path = secrets_dir / "coinbase_api_key_name"
     private_path = secrets_dir / "coinbase_api_private_key"
-    if bundle_path.is_file():
+    if active_path.exists() or bundle_path.is_file():
         return Credentials.load_local(store.data_dir)
     if name_path.is_file() != private_path.is_file():
         raise CredentialError(
