@@ -15,6 +15,10 @@ public releases begin.
 - Local read-only bridge boundary with device-feed token separation.
 - CI for Python quality, dual-variant firmware builds, CodeQL, dependency updates,
   and secret/privacy scanning.
+- A README gallery of lossless production-renderer framebuffer captures for live
+  prices, privacy-mode positions, and BTC candles with BB20 and key levels.
+- Reproducible host capture tooling, public market-data input, renderer/frame
+  checksums, and explicit branch-protection plan constraints.
 
 ### Security
 

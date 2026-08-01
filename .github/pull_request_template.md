@@ -11,7 +11,7 @@
 - [ ] Coinbase credentials remain on the local bridge.
 - [ ] The ESP receives only a scoped device-feed token.
 - [ ] No trading, order, transfer, withdrawal, or generic proxy surface was added.
-- [ ] Logs, fixtures, screenshots, and artifacts contain only synthetic/sanitized data.
+- [ ] Logs, fixtures, screenshots, and artifacts contain only public/synthetic/sanitized data.
 
 ## Validation
 
@@ -32,4 +32,4 @@
 
 ## Evidence
 
-<!-- Use cropped/synthetic images and sanitized logs only. Never attach real account data. -->
+<!-- Use actual-renderer captures with public/sanitized data and sanitized logs only. Never attach real account data. -->

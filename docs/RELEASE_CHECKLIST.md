@@ -17,8 +17,8 @@ board variants, the bridge, documentation, and publication artifacts pass review
 - [ ] Run `git diff --check`.
 - [ ] Run `./scripts/preflight.sh` with strict tool checks.
 - [ ] Run a full-history Gitleaks scan, not only a working-tree scan.
-- [ ] Confirm generated firmware, NVS dumps, logs, screenshots, and caches are
-  absent.
+- [ ] Confirm generated firmware, NVS dumps, logs, unreviewed screenshots, and
+  caches are absent.
 - [ ] Review every new binary; avoid source-release binaries unless required.
 - [ ] Verify `.env.example` and Compose contain placeholders only.
 - [ ] Confirm no personal paths, private hosts, device identifiers, phone numbers,
@@ -89,7 +89,8 @@ board variants, the bridge, documentation, and publication artifacts pass review
 - [ ] Follow `docs/SETUP.md` from a fresh environment.
 - [ ] Verify all relative Markdown links.
 - [ ] Confirm commands do not contain user-specific paths or live endpoints.
-- [ ] Confirm screenshots are synthetic/cropped and metadata-stripped.
+- [ ] Confirm interface images come from the actual renderer with only public or
+  sanitized data, have documented provenance, and are metadata-stripped.
 - [ ] Update hardware matrix and troubleshooting notes.
 - [ ] Recheck trademark disclaimer and unofficial-project wording.
 

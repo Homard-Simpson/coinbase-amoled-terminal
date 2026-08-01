@@ -9,6 +9,37 @@ ESP32-S3 Touch AMOLED 1.8.
 > software is not financial advice and must not be used as a substitute for the
 > official Coinbase interfaces.
 
+## Actual interface
+
+These are direct 368 × 448 framebuffer captures from the production firmware
+renderer using current public market data. They are not concepts or hand-designed
+mockups. Account fields are hidden by the renderer's privacy mode.
+
+### Live prices
+
+![Production prices page showing five public markets](docs/images/prices-page.png)
+
+Five public markets with live prices, short-window direction, and tap targets for
+expanded charts.
+
+### Positions in privacy mode
+
+![Production positions page with account fields obfuscated](docs/images/positions-privacy-page.png)
+
+The actual account page with portfolio, position, quantity, entry, P&L, and
+closed-position fields obfuscated before framebuffer output.
+
+### BTC candles, BB20, and key levels
+
+![Production BTC candle chart with Bollinger bands and support and resistance](docs/images/btc-chart-bb20-levels.png)
+
+Real hourly BTC-USD candles with volume-weighted body widths, BB20 upper/lower and
+middle bands, live-price marker, and public-data support/resistance levels.
+
+See [capture provenance](docs/INTERFACE_CAPTURE.md) for renderer source hashes,
+raw framebuffer checksums, the immutable public-data snapshot, and reproduction
+steps.
+
 ## Status
 
 The project is pre-1.0 and is being prepared in a private repository before a
@@ -85,6 +116,8 @@ tests/     Repository and scanner tests
 - [Security policy](SECURITY.md) and [privacy notes](PRIVACY.md)
 - [Release checklist](docs/RELEASE_CHECKLIST.md)
 - [Private-to-public checklist](docs/PUBLIC_RELEASE_CHECKLIST.md)
+- [Interface capture provenance](docs/INTERFACE_CAPTURE.md)
+- [Branch protection status](docs/BRANCH_PROTECTION.md)
 
 ## Quick start
 
