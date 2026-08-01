@@ -22,7 +22,7 @@ classifiers = [
   "Topic :: Office/Business :: Financial",
 ]
 dependencies = [
-  "cryptography>=42.0.0,<49",
+  "cryptography>=42.0.0,<50",
 ]
 
 [project.scripts]
