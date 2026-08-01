@@ -3,6 +3,82 @@
 This guide describes a safe baseline. Component-specific flags may evolve before
 1.0; check `bridge/README.md` and `firmware/README.md` for implementation details.
 
+## Preflashed hardware: two steps
+
+### Step 1
+
+On macOS or mainstream Linux, run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Homard-Simpson/coinbase-amoled-terminal/main/install.sh | bash
+```
+
+Python 3.11+ and Git are required. The installer does not use Docker, modify shell
+startup files, request administrator access, or invoke `sudo`. Application source
+comes only from this exact repository's `main` branch; isolated pip installs the
+declared runtime dependency from official PyPI. It then writes a per-user service
+and opens the secure quickstart prompt.
+
+### Step 2
+
+Paste the complete Coinbase CDP ECDSA key JSON at the hidden prompt, or drag the
+downloaded JSON file into the terminal, and press Enter. Minified one-line JSON
+and file paths with spaces are accepted. The JSON must contain Coinbase's `name`
+and `privateKey` fields. Legacy secrets, Ed25519 keys, and any curve other than
+P-256/ES256 are rejected.
+
+Before anything is stored, quickstart calls Coinbase's read-only
+`/key_permissions` endpoint. It proceeds only when view access is enabled and
+trade and transfer access are both disabled. The key name and private PEM are
+then written atomically to owner-only files. A separate display ID/token is
+created, the user service is started, and `doctor` repeats the live safety gate.
+A failed safety check rolls back state created by that attempt when it is safe to
+do so.
+
+Quickstart prints the trusted-LAN feed URL, display ID, and protected token-file
+path. It never prints the key or token itself. Enter those pairing values in the
+preflashed display's setup screen. Do not use the trusted-LAN HTTP URL on a hotel,
+guest, public, or otherwise untrusted network; use private HTTPS/tailnet ingress
+instead.
+
+The installer writes these per-user components:
+
+- macOS application data under `~/Library/Application Support/`, plus a LaunchAgent
+  under `~/Library/LaunchAgents/`;
+- Linux application data under `${XDG_DATA_HOME:-~/.local/share}` and a systemd
+  user unit under `${XDG_CONFIG_HOME:-~/.config}/systemd/user/`; and
+- a convenience command at `~/.local/bin/coinbase-amoled-bridge` when that path is
+  available without replacing an existing file.
+
+If launchd or `systemd --user` is unavailable, setup still validates and stores
+the configuration, then prints an exact foreground command. Resolve the user
+service/session issue or keep that foreground process running while the display
+is in use.
+
+Offline sample install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Homard-Simpson/coinbase-amoled-terminal/main/install.sh | bash -s -- --sample
+```
+
+Idempotent update: rerun the Step 1 command. The installer fast-forwards a clean
+checkout, refreshes the virtual environment and service template, revalidates an
+existing setup, and never replaces a different command or a modified checkout.
+
+Uninstall while retaining private state:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Homard-Simpson/coinbase-amoled-terminal/main/install.sh | bash -s -- --uninstall
+```
+
+Append `--purge` to that command to explicitly delete credentials, configuration,
+and device tokens too.
+
+This flow is for the preflashed hardware package. **Source firmware builders:**
+continue with the advanced deployment and build steps below; the source firmware
+first-boot portal generates its own device ID, which must be registered with
+`coinbase-amoled-bridge device add --device-id <displayed-id>`.
+
 ## 1. Choose a deployment
 
 Recommended order:

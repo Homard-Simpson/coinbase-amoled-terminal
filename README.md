@@ -9,6 +9,55 @@ ESP32-S3 Touch AMOLED 1.8.
 > software is not financial advice and must not be used as a substitute for the
 > official Coinbase interfaces.
 
+## Step 1
+
+Run this one line on macOS or mainstream Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Homard-Simpson/coinbase-amoled-terminal/main/install.sh | bash
+```
+
+## Step 2
+
+At the hidden prompt, paste the Coinbase CDP **ECDSA** API key JSON you downloaded
+from Coinbase, or drag that JSON file into the terminal, then press **Enter**.
+Use a dedicated key with **view permission only**. The setup refuses keys that can
+trade or transfer.
+
+### What the installer does
+
+- Clones application source only from this exact repository's `main` branch into
+  your standard per-user data folder, creates an isolated Python environment, and
+  installs the bridge plus its declared `cryptography` dependency from official
+  PyPI. Docker and administrator access are not used.
+- Stores only the CDP key name and P-256 private PEM in atomic mode-0600 files. It
+  never prints the key or passes it in command arguments, environment variables,
+  or service files.
+- Checks Coinbase's live `/key_permissions` endpoint, creates a separate display
+  ID/token, starts a launchd or systemd user service, and runs `doctor`. If user
+  services are unavailable, it prints a safe foreground command instead.
+- Listens on port 8788 for the authenticated display feed. Use it only on a
+  trusted LAN, or put private HTTPS/tailnet ingress in front as described below.
+
+This two-step flow expects the **preflashed hardware package** and its pairing
+screen. If you are building or flashing the source firmware, use
+[Advanced source/developer setup](#advanced-sourcedeveloper-setup) below.
+
+Safe sample mode (no Coinbase account or credential):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Homard-Simpson/coinbase-amoled-terminal/main/install.sh | bash -s -- --sample
+```
+
+Uninstall the app and service while keeping private setup data:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Homard-Simpson/coinbase-amoled-terminal/main/install.sh | bash -s -- --uninstall
+```
+
+Add `--purge` after `--uninstall` only when you also want to delete local
+credentials, configuration, and device tokens.
+
 ## Actual interface
 
 These are direct 368 × 448 framebuffer captures from the production firmware
@@ -112,12 +161,14 @@ flashing. Details: [Hardware compatibility](docs/HARDWARE_COMPATIBILITY.md).
 ## Repository layout
 
 ```text
-bridge/    Local read-only feed service; owns Coinbase credentials
-firmware/  ESP-IDF application for V1 and V2 boards
-docs/      Architecture, setup, security, and release documentation
-scripts/   Public-safety checks, CI helpers, and the one-command preflight
-tests/     Repository and scanner tests
-.github/   CI, dependency updates, and contribution templates
+install.sh  Two-step per-user installer entry point
+installer/  Fixed launchd/systemd templates and safe renderer
+bridge/     Local read-only feed service; owns Coinbase credentials
+firmware/   ESP-IDF application for V1 and V2 boards
+docs/       Architecture, setup, security, and release documentation
+scripts/    Public-safety checks, CI helpers, and the one-command preflight
+tests/      Repository, installer, and scanner tests
+.github/    CI, dependency updates, and contribution templates
 ```
 
 ## Documentation
@@ -136,7 +187,10 @@ tests/     Repository and scanner tests
 - [Contributor License Agreement](CONTRIBUTOR_LICENSE_AGREEMENT.md)
 - [Trademark policy](TRADEMARKS.md)
 
-## Quick start
+## Advanced source/developer setup
+
+Use this section when building firmware from source, developing the bridge, or
+configuring private HTTPS/tailnet ingress manually.
 
 ### 1. Review the boundaries
 

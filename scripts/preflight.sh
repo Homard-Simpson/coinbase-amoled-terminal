@@ -34,18 +34,19 @@ note "Public secret and privacy scan"
 "$PYTHON" scripts/scan_public_safety.py .
 
 note "Shell syntax"
+bash -n install.sh
 while IFS= read -r -d '' script; do
   bash -n "$script"
-done < <(find scripts -type f -name '*.sh' -print0)
+done < <(find scripts installer -type f -name '*.sh' -print0)
 
 note "Python bytecode compilation"
-"$PYTHON" -m compileall -q scripts tests bridge
+"$PYTHON" -m compileall -q installer scripts tests bridge
 
 if "$PYTHON" -m ruff --version >/dev/null 2>&1; then
   note "Ruff lint"
-  "$PYTHON" -m ruff check bridge scripts tests
+  "$PYTHON" -m ruff check bridge installer scripts tests
   note "Ruff format check"
-  "$PYTHON" -m ruff format --check bridge scripts tests
+  "$PYTHON" -m ruff format --check bridge installer scripts tests
 else
   optional_missing "ruff (install requirements-dev.txt)"
 fi
@@ -61,14 +62,15 @@ else
   note "Python tests (standard-library fallback)"
   "$PYTHON" -m unittest discover -s tests -p 'test_*.py'
   if [[ -d bridge/tests ]]; then
-    ( cd bridge && PYTHONPATH=src "$PYTHON" -m unittest discover -s tests -p 'test_*.py' )
+    ( cd bridge && PYTHONPATH=src "$PYTHON" -m unittest discover -s tests -t . -p 'test_*.py' )
   fi
   optional_missing "pytest (standard-library tests passed)"
 fi
 
 if command -v shellcheck >/dev/null 2>&1; then
   note "ShellCheck"
-  find scripts -type f -name '*.sh' -print0 | xargs -0 shellcheck
+  find scripts installer -type f -name '*.sh' -print0 | xargs -0 shellcheck
+  shellcheck install.sh
 else
   optional_missing "shellcheck"
 fi

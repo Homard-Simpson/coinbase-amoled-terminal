@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import logging
 import os
+import shlex
 import signal
+import socket
 import sys
 import threading
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +21,7 @@ from . import __version__
 from .auth import (
     Credentials,
     DeviceManager,
+    DeviceProvision,
     DeviceRegistry,
     JWTSigner,
     prompt_key_name,
@@ -27,11 +32,18 @@ from .config import ConfigStore
 from .errors import BridgeError, ConfigError, CredentialError
 from .feed import FeedService, SampleFeedService
 from .logging_utils import configure_logging, log_event
+from .quickstart import prompt_for_cdp_key
 from .server import BridgeApplication, create_server
 from .symbols import normalize_symbols
+from .user_service import (
+    ServiceStartResult,
+    rollback_user_service,
+    start_user_service,
+)
 from .util import is_loopback_host, parse_bool
 
 DEFAULT_DATA_DIR = "~/.config/coinbase-amoled-bridge"
+DEFAULT_BRIDGE_PORT = 8788
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -65,6 +77,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--symbols",
         default=",".join(("BTC", "SOL", "XLM", "HYPE", "ETH")),
         help="comma-separated base symbols or USD products",
+    )
+
+    quickstart = commands.add_parser(
+        "quickstart",
+        help="secure one-prompt setup, safety check, and service start",
+    )
+    quickstart.add_argument(
+        "--sample",
+        action="store_true",
+        help="use offline sample data without Coinbase credentials",
     )
 
     serve = commands.add_parser("serve", help="run the HTTP bridge")
@@ -234,6 +256,186 @@ def command_setup(args: argparse.Namespace, store: ConfigStore) -> int:
     return 0
 
 
+@dataclass(slots=True)
+class _QuickstartChanges:
+    config_existed: bool
+    original_config: dict[str, Any] | None
+    config_initialized: bool = False
+    credential_paths: tuple[Path, Path] | None = None
+    provision: DeviceProvision | None = None
+
+    @property
+    def changed(self) -> bool:
+        return bool(
+            (self.config_initialized and not self.config_existed)
+            or self.credential_paths
+            or self.provision
+        )
+
+
+def _local_credentials_if_present(store: ConfigStore) -> Credentials | None:
+    secrets_dir = store.data_dir / "secrets"
+    name_path = secrets_dir / "coinbase_api_key_name"
+    private_path = secrets_dir / "coinbase_api_private_key"
+    if name_path.is_file() != private_path.is_file():
+        raise CredentialError(
+            "local Coinbase credential files are incomplete; restore or remove the pair"
+        )
+    if not name_path.is_file():
+        return None
+    return Credentials.load_local(store.data_dir)
+
+
+def _assert_live_key_is_view_only(
+    credentials: Credentials, timeout: float = 8.0
+) -> None:
+    CoinbaseClient(JWTSigner(credentials), timeout=timeout).assert_view_only()
+
+
+def _existing_quickstart_device(
+    store: ConfigStore, config: dict[str, Any]
+) -> DeviceProvision | None:
+    for device_id, record in sorted(config["devices"].items()):
+        token_path = store.data_dir / "secrets" / "devices" / f"{device_id}.token"
+        if record["enabled"] and token_path.is_file():
+            return DeviceProvision(device_id=device_id, token_path=token_path)
+    return None
+
+
+def _rollback_quickstart(store: ConfigStore, changes: _QuickstartChanges) -> None:
+    if changes.config_existed and changes.original_config is not None:
+        store.replace(changes.original_config)
+    elif changes.config_initialized:
+        try:
+            store.path.unlink(missing_ok=True)
+            store.lock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    if changes.provision is not None:
+        try:
+            changes.provision.token_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    if changes.credential_paths is not None:
+        for path in changes.credential_paths:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+    for path in (
+        store.data_dir / "secrets" / "devices",
+        store.data_dir / "secrets",
+        store.data_dir,
+    ):
+        try:
+            path.rmdir()
+        except OSError:
+            pass
+
+
+def _manual_service_command(store: ConfigStore, *, sample: bool) -> str:
+    command = [
+        sys.executable,
+        "-m",
+        "coinbase_amoled_bridge",
+        "--data-dir",
+        str(store.data_dir),
+        "serve",
+        "--host",
+        "0.0.0.0",
+        "--allow-insecure-public-bind",
+    ]
+    if sample:
+        command.append("--sample")
+    return shlex.join(command)
+
+
+def _lan_feed_url() -> str:
+    address = ""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as connection:
+            connection.connect(("192.0.2.1", 9))
+            address = str(connection.getsockname()[0])
+        parsed = ipaddress.ip_address(address)
+        if parsed.is_loopback or parsed.is_unspecified:
+            address = ""
+    except (OSError, ValueError):
+        address = ""
+    host = address or "<this-computer's-LAN-IP>"
+    return f"http://{host}:{DEFAULT_BRIDGE_PORT}/v1/device-feed"
+
+
+def _print_quickstart_result(
+    store: ConfigStore,
+    provision: DeviceProvision,
+    service: ServiceStartResult,
+    *,
+    sample: bool,
+) -> None:
+    print("Quickstart complete: read-only safety checks passed.")
+    if sample:
+        print("Mode: sample/offline; no Coinbase account was contacted.")
+    if service.started:
+        print("Background service: running.")
+    else:
+        reason = (
+            "could not be started"
+            if service.status == "failed"
+            else "manager is unavailable"
+        )
+        print(f"Background service {reason}; run this command in a terminal:")
+        print(_manual_service_command(store, sample=sample))
+    print("\nPair your preflashed display:")
+    print(f"Bridge feed URL: {_lan_feed_url()}")
+    print(f"Device ID: {provision.device_id}")
+    print(f"Device token file (mode 0600): {provision.token_path}")
+    print(
+        "Enter those values in the display pairing screen; the token was not printed."
+    )
+    print("Use this trusted-LAN URL only on a network you control.")
+
+
+def command_quickstart(args: argparse.Namespace, store: ConfigStore) -> int:
+    sample = _sample_requested(args.sample)
+    config_existed = store.exists()
+    original_config = store.load() if config_existed else None
+    changes = _QuickstartChanges(config_existed, original_config)
+    service = ServiceStartResult("unavailable", "none")
+
+    credentials = None if sample else _local_credentials_if_present(store)
+    if not sample and credentials is None:
+        credentials = prompt_for_cdp_key()
+    if credentials is not None:
+        # Validate /key_permissions before writing any newly pasted credential.
+        _assert_live_key_is_view_only(credentials)
+
+    try:
+        config = store.initialize()
+        changes.config_initialized = True
+        if credentials is not None and _local_credentials_if_present(store) is None:
+            changes.credential_paths = save_local_credentials(
+                store.data_dir,
+                key_name=credentials.key_name,
+                private_key_pem=credentials.private_key_pem,
+            )
+
+        provision = _existing_quickstart_device(store, config)
+        if provision is None:
+            provision = DeviceManager(store).add(label="preflashed AMOLED terminal")
+            changes.provision = provision
+
+        service = start_user_service()
+        command_doctor(argparse.Namespace(sample=sample, local_only=True), store)
+    except BaseException:
+        if changes.changed:
+            rollback_user_service(service)
+            _rollback_quickstart(store, changes)
+        raise
+
+    _print_quickstart_result(store, provision, service, sample=sample)
+    return 0
+
+
 def command_device(args: argparse.Namespace, store: ConfigStore) -> int:
     manager = DeviceManager(store)
     if args.device_command == "add":
@@ -285,7 +487,11 @@ def command_doctor(args: argparse.Namespace, store: ConfigStore) -> int:
         SampleFeedService(config["settings"]).get_feed()
         print("OK: config, allowlist, and sample feed are valid; read_only=true.")
         return 0
-    credentials = Credentials.load(store.data_dir)
+    credentials = (
+        Credentials.load_local(store.data_dir)
+        if getattr(args, "local_only", False)
+        else Credentials.load(store.data_dir)
+    )
     client = CoinbaseClient(
         JWTSigner(credentials),
         timeout=float(config["settings"]["upstream_timeout_seconds"]),
@@ -388,6 +594,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         store = ConfigStore(args.data_dir)
         if args.command == "setup":
             return command_setup(args, store)
+        if args.command == "quickstart":
+            return command_quickstart(args, store)
         if args.command == "serve":
             return command_serve(args, store)
         if args.command == "doctor":

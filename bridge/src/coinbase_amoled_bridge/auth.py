@@ -45,6 +45,45 @@ class Credentials:
     source: str
 
     @classmethod
+    def from_values(
+        cls, *, key_name: str, private_key_pem: bytes, source: str
+    ) -> Credentials:
+        clean_name = key_name.strip()
+        if (
+            not clean_name
+            or len(clean_name.encode("utf-8")) > MAX_KEY_NAME_BYTES
+            or any(ord(ch) < 0x20 or ch.isspace() for ch in clean_name)
+        ):
+            raise CredentialError("API key name is invalid")
+        normalized_private_key = private_key_pem.strip() + b"\n"
+        JWTSigner._load_private_key(normalized_private_key)
+        return cls(
+            key_name=clean_name,
+            private_key_pem=normalized_private_key,
+            source=source,
+        )
+
+    @classmethod
+    def load_local(cls, data_dir: str | os.PathLike[str]) -> Credentials:
+        data_path = Path(data_dir).expanduser().resolve()
+        key_name_bytes = _read_secret_file(
+            data_path / "secrets" / "coinbase_api_key_name", MAX_KEY_NAME_BYTES
+        )
+        private_key_bytes = _read_secret_file(
+            data_path / "secrets" / "coinbase_api_private_key",
+            MAX_PRIVATE_KEY_BYTES,
+        )
+        try:
+            key_name = key_name_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise CredentialError("API key name must be UTF-8") from exc
+        return cls.from_values(
+            key_name=key_name,
+            private_key_pem=private_key_bytes,
+            source="local_setup",
+        )
+
+    @classmethod
     def load(
         cls,
         data_dir: str | os.PathLike[str],
@@ -101,20 +140,15 @@ class Credentials:
             )
 
         try:
-            key_name = key_name_bytes.decode("utf-8").strip()
+            key_name = key_name_bytes.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise CredentialError("API key name must be UTF-8") from exc
-        if not key_name or len(key_name.encode("utf-8")) > MAX_KEY_NAME_BYTES:
-            raise CredentialError("API key name is empty or too long")
-        if any(ord(ch) < 0x20 or ch.isspace() for ch in key_name):
-            raise CredentialError(
-                "API key name contains whitespace or control characters"
-            )
-
-        private_key_bytes = private_key_bytes.strip() + b"\n"
         # Parse immediately so bad material fails before the server can bind.
-        JWTSigner._load_private_key(private_key_bytes)
-        return cls(key_name=key_name, private_key_pem=private_key_bytes, source=source)
+        return cls.from_values(
+            key_name=key_name,
+            private_key_pem=private_key_bytes,
+            source=source,
+        )
 
 
 def _read_secret_file(path: Path, maximum_bytes: int) -> bytes:
@@ -484,15 +518,13 @@ def save_local_credentials(
 ) -> tuple[Path, Path]:
     """Validate and store local setup credentials as private files."""
 
-    key_name = key_name.strip()
-    if (
-        not key_name
-        or len(key_name.encode("utf-8")) > MAX_KEY_NAME_BYTES
-        or any(ord(ch) < 0x20 or ch.isspace() for ch in key_name)
-    ):
-        raise CredentialError("API key name is invalid")
-    normalized_private_key = private_key_pem.strip() + b"\n"
-    JWTSigner._load_private_key(normalized_private_key)
+    validated = Credentials.from_values(
+        key_name=key_name,
+        private_key_pem=private_key_pem,
+        source="local_setup",
+    )
+    key_name = validated.key_name
+    normalized_private_key = validated.private_key_pem
     secrets_dir = Path(data_dir).expanduser().resolve() / "secrets"
     key_name_path = secrets_dir / "coinbase_api_key_name"
     private_key_path = secrets_dir / "coinbase_api_private_key"

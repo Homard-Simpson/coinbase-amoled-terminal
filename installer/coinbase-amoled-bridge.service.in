@@ -1,0 +1,16 @@
+[Unit]
+Description=Read-only Coinbase AMOLED bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=@EXECUTABLE_SYSTEMD@ --data-dir @DATA_DIR_SYSTEMD@ serve --host 0.0.0.0 --allow-insecure-public-bind@SAMPLE_ARG_SYSTEMD@
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=default.target

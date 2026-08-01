@@ -47,13 +47,13 @@ jobs:
           fi
 
       - name: Check shell syntax
-        run: bash -n scripts/*.sh
+        run: bash -n install.sh scripts/*.sh
 
       - name: Lint
-        run: python -m ruff check bridge scripts tests
+        run: python -m ruff check bridge installer scripts tests
 
       - name: Check formatting
-        run: python -m ruff format --check bridge scripts tests
+        run: python -m ruff format --check bridge installer scripts tests
 
       - name: Test repository
         run: python -m pytest -q

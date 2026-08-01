@@ -20,9 +20,11 @@ restrictions, and no trade or transfer capability.
 ## Deployment expectations
 
 1. Keep the bridge and its data directory patched and access-controlled.
-2. Use HTTPS end to end. The default host bind is loopback. A non-loopback plain
-   HTTP bind requires an explicit unsafe acknowledgement and is intended only
-   behind a trusted TLS reverse proxy or inside a private container network.
+2. Use HTTPS end to end outside a network you control. The default host bind is
+   loopback. The preflashed-package user service explicitly enables authenticated
+   plain HTTP for same-trusted-LAN pairing; never use it on a guest/public LAN or
+   publish it through router forwarding. Other non-loopback binds belong behind a
+   trusted TLS reverse proxy or inside a private container network.
 3. Do not place bearer tokens in URLs, shell history, screenshots, tickets, or
    logs. The setup CLI writes them to mode-0600 files and never prints values.
 4. Give every physical terminal a separate opaque device ID and token. Revoke or

@@ -91,12 +91,37 @@ python -m pip install --upgrade pip
 python -m pip install -e .
 ```
 
+## Secure one-prompt quickstart
+
+The root `install.sh` invokes this automatically after installing its per-user
+launchd/systemd service:
+
+```sh
+coinbase-amoled-bridge --data-dir ./data quickstart
+```
+
+At one hidden prompt, paste the downloaded Coinbase CDP ECDSA JSON or drag the
+JSON file into the terminal. The parser accepts Coinbase's `name` and
+`privateKey` fields, validates an unencrypted P-256/ES256 PEM, and rejects Legacy,
+Ed25519, RSA, malformed, and oversized inputs. It checks `/key_permissions`
+before saving, stores only the key name and private PEM in atomic mode-0600 files,
+creates/reuses one display credential, starts the installed user service, and
+runs `doctor`. Newly created state is rolled back if final validation fails.
+Credential and device-token values are never printed.
+
+The installer configures the authenticated feed on trusted-LAN port `8788` for a
+preflashed package pairing screen. Use private HTTPS/tailnet ingress on any
+untrusted network. Source-built firmware generates its own device ID; register it
+with the advanced `device add --device-id` command.
+
 ## Offline/sample quick start
 
 Sample mode does not read Coinbase credentials or make network requests, but it
 still requires device authentication.
 
 ```sh
+coinbase-amoled-bridge --data-dir ./data quickstart --sample
+# Or use the lower-level commands:
 coinbase-amoled-bridge --data-dir ./data setup --sample --non-interactive
 coinbase-amoled-bridge --data-dir ./data doctor --sample
 coinbase-amoled-bridge --data-dir ./data serve --sample

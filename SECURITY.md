@@ -39,8 +39,11 @@ Changes must preserve these boundaries:
    device to the minimal display feed. It is not a Coinbase credential.
 4. **No trading surface exists.** The bridge must not implement order placement,
    cancellation, modification, transfer, or withdrawal routes.
-5. **Network exposure is private by default.** Bind to loopback and use a private
-   tailnet or an authenticated TLS reverse proxy for cross-host access.
+5. **Network exposure stays private.** The standalone CLI binds to loopback. The
+   preflashed-package installer explicitly opens the authenticated feed on the
+   host's trusted LAN so the display can pair; do not use that mode on an
+   untrusted network or expose it through router forwarding. Use a private
+   tailnet or an authenticated TLS reverse proxy for cross-network access.
 6. **Logs and errors are minimized.** Never log authorization headers, raw
    Coinbase responses, credential files, feed tokens, or full portfolio payloads.
 
@@ -54,7 +57,8 @@ review and should normally be rejected.
 - Use a unique random feed token per display and rotate it after loss or resale.
 - Keep the bridge and reverse proxy patched.
 - Terminate TLS before traffic leaves the bridge host.
-- Restrict inbound access by host firewall and private-network policy.
+- Restrict inbound access by host firewall and private-network policy; allow
+  installer port 8788 only from the trusted display LAN.
 - Avoid displaying sensitive values where shoulder surfing is possible.
 - Erase device NVS before transferring hardware to another person.
 - Review dependency and CodeQL alerts before each release.

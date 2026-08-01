@@ -363,7 +363,8 @@ def scan_paths(inputs: Sequence[Path], max_bytes: int = DEFAULT_MAX_BYTES) -> Sc
 
         if size > max_bytes:
             try:
-                prefix = path.open("rb").read(8192)
+                with path.open("rb") as handle:
+                    prefix = handle.read(8192)
                 prefix.decode("utf-8")
             except (OSError, UnicodeDecodeError):
                 binary_skipped += 1

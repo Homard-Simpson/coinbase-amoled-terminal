@@ -24,11 +24,21 @@ public releases begin.
   intended for CERN-OHL-S-2.0.
 - Commercial-licensing, contributor-agreement, and trademark policies supporting
   optional proprietary exceptions while preserving royalty-free copyleft resale.
+- A two-step macOS/Linux installer with isolated Python environment, per-user
+  launchd/systemd service, idempotent updates, safe uninstall, and offline sample
+  mode.
+- A secure one-prompt `quickstart` command for Coinbase CDP JSON or dragged-file
+  input, display credential creation, service startup, and doctor checks.
 
 ### Security
 
 - Documented a local-bridge credential boundary and no-trading invariant.
 - Added repository preflight checks for common secrets and personal
   infrastructure.
+- Quickstart rejects Legacy, Ed25519, non-P-256, malformed, and oversized keys;
+  enforces the live view-only permission gate before storage; and rolls back new
+  state after failed final validation.
+- Installer scripts and service templates are included in shell, lint, test, and
+  public-safety CI gates.
 
 No stable version has been released.
