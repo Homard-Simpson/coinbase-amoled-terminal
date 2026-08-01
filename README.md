@@ -42,9 +42,23 @@ steps.
 
 ## Status
 
-The project is pre-1.0 and is being prepared in a private repository before a
-public preview. Interfaces, provisioning steps, and firmware behavior may change.
-There are no stable releases yet.
+This is a public, pre-1.0 open-source release. Interfaces, provisioning steps,
+and firmware behavior may change, and there are no stable releases yet. The
+security-first defaults and read-only trading boundary remain release
+requirements, not optional examples.
+
+## Sustainable project model
+
+The open-source licenses permit personal and commercial use, modification,
+hosting, support, and resale when their terms are followed. Compliant commercial
+resale owes the project no royalty. Buying hardware or support is not required to
+use the source.
+
+The maintainers may separately offer official preassembled or preflashed
+hardware, integration, updates, and support. They may also offer a paid
+proprietary exception for closed-source use. Those optional offerings fund
+maintenance; they do not remove the open-source option or imply Coinbase
+endorsement. See [commercial licensing](COMMERCIAL-LICENSING.md).
 
 ## What it does
 
@@ -115,9 +129,12 @@ tests/     Repository and scanner tests
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Security policy](SECURITY.md) and [privacy notes](PRIVACY.md)
 - [Release checklist](docs/RELEASE_CHECKLIST.md)
-- [Private-to-public checklist](docs/PUBLIC_RELEASE_CHECKLIST.md)
+- [Public-release checklist](docs/PUBLIC_RELEASE_CHECKLIST.md)
 - [Interface capture provenance](docs/INTERFACE_CAPTURE.md)
 - [Branch protection status](docs/BRANCH_PROTECTION.md)
+- [Licensing scope](LICENSING.md) and [commercial licensing](COMMERCIAL-LICENSING.md)
+- [Contributor License Agreement](CONTRIBUTOR_LICENSE_AGREEMENT.md)
+- [Trademark policy](TRADEMARKS.md)
 
 ## Quick start
 
@@ -220,7 +237,8 @@ make compose-check
 
 ## Contributing
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) and the
+Read [CONTRIBUTING.md](CONTRIBUTING.md), the
+[Contributor License Agreement](CONTRIBUTOR_LICENSE_AGREEMENT.md), and the
 [Code of Conduct](CODE_OF_CONDUCT.md). Security vulnerabilities belong in a
 private GitHub security report, not a public issue; see [SECURITY.md](SECURITY.md).
 
@@ -230,8 +248,21 @@ Before opening a pull request, run:
 ./scripts/preflight.sh
 ```
 
-## License and trademarks
+## Licensing and trademarks
 
-Source code is licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE)
-for attribution and trademark terms. The license does not grant rights to use
-Coinbase trademarks, logos, or brand assets.
+Original root and bridge software is available under
+[GNU AGPL-3.0-or-later](LICENSE). Original firmware software is available under
+[GNU GPL-3.0-or-later](firmware/LICENSE). Third-party components and assets retain
+their upstream terms.
+
+No original hardware/CAD/source-design files are currently included. Future
+original hardware design files are intended to use CERN-OHL-S-2.0 unless a
+file-level notice says otherwise; third-party Waveshare designs and documentation
+will not be relicensed.
+
+Paid proprietary exceptions may be available for closed-source use, but
+AGPL/GPL-compliant commercial use and resale remain royalty-free. See
+[licensing scope](LICENSING.md), [commercial licensing](COMMERCIAL-LICENSING.md),
+[NOTICE](NOTICE), and the [trademark policy](TRADEMARKS.md). These license choices
+and the contributor agreement should be reviewed by qualified counsel before
+material commercial reliance.

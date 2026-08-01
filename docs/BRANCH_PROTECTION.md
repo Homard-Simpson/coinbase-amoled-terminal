@@ -1,22 +1,25 @@
 # Branch Protection Status
 
-The repository is private and must remain private. On 2026-08-01, authenticated
-GitHub API requests using the `Homard-Simpson` account returned HTTP 403 for both
-classic protection and repository rulesets on `main`:
+Before the 2026-08-01 public release, authenticated GitHub API requests using the
+repository owner's account returned HTTP 403 for both classic protection and
+repository rulesets on `main`:
 
 ```text
 Upgrade to GitHub Pro or make this repository public to enable this feature.
 ```
 
-GitHub therefore does not expose server-enforced branch protection for this
-private repository on its current plan. The project will not be made public and
-no plan purchase or upgrade is assumed.
+No workflow was represented as a substitute for protection, and the project did
+not purchase a plan upgrade. After authorized public release, `main` is protected
+with these server-enforced settings:
 
-GitHub Actions remain useful checks, but they do **not** prevent an authorized
-user from force-pushing or bypassing review. No workflow in this repository is
-represented as a substitute for branch protection.
+- pull requests are required;
+- at least one approving review is required;
+- stale approvals are dismissed when new commits are pushed;
+- conversation resolution is required;
+- administrators are subject to the rule;
+- force pushes and branch deletion are blocked; and
+- only stable, currently passing CI contexts are required.
 
-Until the account plan changes, maintainers must treat this as an explicit
-platform constraint: avoid force pushes, review changes before pushing `main`,
-and keep recoverable local clones/backups. Recheck the API before claiming that
-server-side protection is active.
+GitHub Actions are evidence for a change, but they do not independently prevent
+an authorized bypass. Maintainers should recheck the branch protection API after
+repository setting changes and before claiming these controls remain active.

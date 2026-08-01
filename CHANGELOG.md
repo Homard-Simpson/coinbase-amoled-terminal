@@ -19,6 +19,11 @@ public releases begin.
   prices, privacy-mode positions, and BTC candles with BB20 and key levels.
 - Reproducible host capture tooling, public market-data input, renderer/frame
   checksums, and explicit branch-protection plan constraints.
+- Public open-source release licensing: AGPL-3.0-or-later for root/bridge software
+  and GPL-3.0-or-later for firmware, with future original hardware designs
+  intended for CERN-OHL-S-2.0.
+- Commercial-licensing, contributor-agreement, and trademark policies supporting
+  optional proprietary exceptions while preserving royalty-free copyleft resale.
 
 ### Security
 

@@ -41,8 +41,10 @@ board variants, the bridge, documentation, and publication artifacts pass review
 
 - [ ] Review Python, ESP-IDF component, container, and GitHub Action changes.
 - [ ] Confirm lockfiles/manifests are updated intentionally.
-- [ ] Check dependency licenses are compatible with Apache-2.0 distribution.
-- [ ] Preserve all required third-party notices.
+- [ ] Check dependency licenses are compatible with AGPL-3.0-or-later for the
+  bridge/root and GPL-3.0-or-later for firmware.
+- [ ] Preserve all required third-party notices and do not relicense third-party
+  hardware or documentation.
 - [ ] Generate an SBOM for release components when tooling is available.
 
 ## 5. Bridge verification

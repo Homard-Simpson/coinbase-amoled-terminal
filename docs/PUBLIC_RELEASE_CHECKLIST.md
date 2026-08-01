@@ -37,14 +37,22 @@ If any answer is uncertain, keep the repository private.
 
 ## Gate 3 — Legal and brand review
 
-- [ ] `LICENSE` contains the complete Apache License 2.0 text.
+- [ ] Root and bridge license files contain the complete AGPLv3 text and clearly
+  state AGPL-3.0-or-later application.
+- [ ] `firmware/LICENSE` contains the complete GPLv3 text and firmware docs clearly
+  state GPL-3.0-or-later application.
+- [ ] No original hardware design files are present, or each original design has
+  an explicit CERN-OHL-S-2.0 scope that excludes third-party material.
 - [ ] `NOTICE` preserves required attributions and the Coinbase trademark
   disclaimer.
 - [ ] README prominently says the project is unofficial and not affiliated with
   Coinbase.
 - [ ] No Coinbase logo, trade dress, or copied proprietary asset is included.
 - [ ] Third-party license/NOTICE obligations are satisfied.
-- [ ] Every contributor has the right to license their contribution.
+- [ ] `COMMERCIAL-LICENSING.md`, the contributor agreement, and trademark policy
+  are internally consistent and have been reviewed by qualified counsel.
+- [ ] Every contributor has accepted the contributor agreement and has the right
+  to license their contribution.
 
 ## Gate 4 — Documentation truth check
 
@@ -68,8 +76,12 @@ If any answer is uncertain, keep the repository private.
   runs automatically after the repository becomes public.
 - [ ] Restrict workflow token permissions to read-only by default.
 - [ ] Require approval for workflows from first-time external contributors.
-- [ ] Protect the default branch with pull requests and required status checks.
-- [ ] Require conversation resolution and block force pushes/deletions.
+- [ ] Prepare default-branch protection requiring pull requests, one approval,
+  stale-review dismissal, conversation resolution, admin enforcement, and blocked
+  force pushes/deletions. If the private-repository plan returns HTTP 403, apply
+  and verify this protection immediately after changing visibility.
+- [ ] Require only stable status-check contexts that are known and currently
+  passing.
 - [ ] Configure merge and tag rules appropriate to the maintainer model.
 - [ ] Remove stale deploy keys, webhooks, collaborators, environments, and Actions
   secrets.
@@ -111,6 +123,8 @@ If any answer is uncertain, keep the repository private.
 
 - [ ] Capture final private-repository settings for rollback/reference.
 - [ ] Change visibility only after all prior gates have sign-off.
+- [ ] Immediately apply and verify default-branch protection if it was unavailable
+  on the private-repository plan.
 - [ ] Immediately verify the public file tree, branches, tags, releases, packages,
   Actions, security policy, and issue forms.
 - [ ] Confirm search engines/users cannot access any unintended deployment or

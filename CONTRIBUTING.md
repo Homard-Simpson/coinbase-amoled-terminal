@@ -1,7 +1,7 @@
 # Contributing
 
 Thanks for helping improve Coinbase AMOLED Terminal. Contributions should keep the
-project small, read-only, private-by-default, and safe to publish.
+project small, read-only, deployment-private-by-default, and safe to publish.
 
 ## Before starting
 
@@ -72,15 +72,30 @@ A good pull request:
 - avoids unrelated reformatting; and
 - passes required CI checks.
 
-By submitting a contribution, you agree that it may be licensed under the Apache
-License 2.0 and that you have the right to submit it.
+Every copyright-significant contribution requires acceptance of the
+[Contributor License Agreement](CONTRIBUTOR_LICENSE_AGREEMENT.md). Put this exact
+statement in the pull-request description and check the CLA box in the template:
+
+```text
+I have read and agree to the Contributor License Agreement.
+```
+
+The CLA leaves your copyright with you while granting rights needed for the
+Project's AGPL/GPL distribution and optional proprietary dual licensing. A
+maintainer must not merge a contribution without explicit acceptance. If you
+submit on behalf of an employer or another entity, you must have authority to
+make the CLA grants.
 
 ## Handling test data
 
-Use synthetic fixtures only. Never copy a real Coinbase response, account value,
-credential, token, device identifier, private hostname, network address, serial
-log, or screenshot into the repository. Construct secret-like values dynamically
-inside scanner tests so the test source itself remains safe to publish.
+Use synthetic fixtures for authenticated/account behavior. Public market-data
+snapshots may be used when their source and capture time are documented. Never
+copy an authenticated Coinbase response, account value, credential, token,
+device identifier, private hostname, network address, or unsanitized serial log
+into the repository. Interface evidence must come from the actual renderer using
+only public or synthetic data, with privacy mode enabled for account pages.
+Construct secret-like values dynamically inside scanner tests so the test source
+itself remains safe to publish.
 
 ## Code of Conduct
 

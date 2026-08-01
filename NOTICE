@@ -1,22 +1,32 @@
 Coinbase AMOLED Terminal
 Copyright 2026 Coinbase AMOLED Terminal contributors
 
-This product includes software developed by Coinbase AMOLED Terminal
-contributors and is licensed under the Apache License, Version 2.0.
+This is an independent, unofficial open-source project. It is not affiliated
+with, endorsed by, sponsored by, or supported by Coinbase.
 
-Coinbase AMOLED Terminal is an independent, unofficial open-source project. It
-is not affiliated with, endorsed by, sponsored by, or supported by Coinbase.
+Original root and bridge software is offered under GNU AGPL-3.0-or-later.
+Original firmware software is offered under GNU GPL-3.0-or-later. Separately
+negotiated proprietary licenses may be available from the relevant copyright
+holders. See LICENSE, firmware/LICENSE, LICENSING.md, and
+COMMERCIAL-LICENSING.md.
+
+No original hardware/CAD/source-design files are currently included. Future
+original hardware design files are intended to use CERN-OHL-S-2.0 unless their
+file-level notices state otherwise. Third-party Waveshare hardware,
+documentation, reference material, and marks are not relicensed by this project.
+
 "Coinbase" and related names, logos, and marks are trademarks or registered
 trademarks of Coinbase, Inc. or its affiliates. Waveshare, ESP32, and other
-third-party names and marks belong to their respective owners.
-
-The Apache License does not grant permission to use any Coinbase or other
-third-party trademark, logo, trade dress, or brand asset. References are
+third-party names and marks belong to their respective owners. References are
 nominative and descriptive only and identify interoperability or compatible
-hardware. Use of Coinbase services remains subject to Coinbase's applicable
-terms and policies.
+hardware. See TRADEMARKS.md.
 
-Third-party components may carry their own copyright and license notices. Those
-notices remain applicable and should be preserved in source and binary
-distributions.
+The software licenses do not grant permission to use any Coinbase or other
+third-party trademark, logo, trade dress, or brand asset. Use of Coinbase
+services remains subject to Coinbase's applicable terms and policies.
 
+Third-party components and assets retain their own copyright, license, and notice
+requirements. Preserve those notices in source and binary distributions. In
+particular, firmware/main/glcdfont.h and the documentation capture copy of that
+font retain the upstream Adafruit BSD notice recorded in
+firmware/THIRD_PARTY_NOTICES.md.

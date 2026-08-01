@@ -13,6 +13,12 @@
 - [ ] No trading, order, transfer, withdrawal, or generic proxy surface was added.
 - [ ] Logs, fixtures, screenshots, and artifacts contain only public/synthetic/sanitized data.
 
+## Contributor License Agreement
+
+- [ ] I have read and agree to the Contributor License Agreement.
+
+<!-- Keep the exact statement above. Maintainers must not merge a copyright-significant contribution without it. -->
+
 ## Validation
 
 <!-- List exact tests and hardware revisions exercised. -->

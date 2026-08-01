@@ -152,6 +152,11 @@ This directory intentionally contains source, scripts, schemas, tests, and docum
 
 ## License and trademarks
 
-Firmware source is licensed under the Apache License 2.0; see [`LICENSE`](LICENSE). Third-party managed components retain their upstream licenses, and the bitmap font notice is in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+Original firmware source is licensed under GNU GPL-3.0-or-later; see
+[`LICENSE`](LICENSE). Third-party managed components retain their upstream
+licenses, and the bitmap font notice is in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). GPL-compliant commercial
+hardware resale remains permitted without royalty; distributors must satisfy the
+applicable source, notice, and installation-information requirements.
 
 Coinbase is a trademark of Coinbase, Inc. All product names and trademarks belong to their respective owners.

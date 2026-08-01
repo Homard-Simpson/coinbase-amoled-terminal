@@ -13,6 +13,10 @@ REQUIRED_FILES = (
     "SECURITY.md",
     "PRIVACY.md",
     "CONTRIBUTING.md",
+    "LICENSING.md",
+    "CONTRIBUTOR_LICENSE_AGREEMENT.md",
+    "COMMERCIAL-LICENSING.md",
+    "TRADEMARKS.md",
     "CODE_OF_CONDUCT.md",
     "CHANGELOG.md",
     "ROADMAP.md",
@@ -61,6 +65,24 @@ class RepositoryScaffoldTests(unittest.TestCase):
         self.assertIn("credentials remain on the local bridge", policy)
         self.assertIn("no trading surface", policy)
         self.assertIn("private vulnerability", policy)
+
+    def test_license_boundaries_and_cla_acceptance_are_explicit(self) -> None:
+        root_license = (ROOT / "LICENSE").read_text(encoding="utf-8")
+        bridge_license = (ROOT / "bridge" / "LICENSE").read_text(encoding="utf-8")
+        firmware_license = (ROOT / "firmware" / "LICENSE").read_text(encoding="utf-8")
+        self.assertIn("GNU AFFERO GENERAL PUBLIC LICENSE", root_license)
+        self.assertEqual(root_license, bridge_license)
+        self.assertIn("GNU GENERAL PUBLIC LICENSE", firmware_license)
+        self.assertNotIn("AFFERO", firmware_license)
+        scope = (ROOT / "LICENSING.md").read_text(encoding="utf-8")
+        for identifier in ("AGPL-3.0-or-later", "GPL-3.0-or-later", "CERN-OHL-S-2.0"):
+            self.assertIn(identifier, scope)
+
+        acceptance = "I have read and agree to the Contributor License Agreement."
+        contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+        template = (ROOT / ".github" / "pull_request_template.md").read_text(encoding="utf-8")
+        self.assertIn(acceptance, contributing)
+        self.assertIn(acceptance, template)
 
     def test_hardware_matrix_names_both_controller_paths(self) -> None:
         matrix = (ROOT / "docs" / "HARDWARE_COMPATIBILITY.md").read_text(encoding="utf-8")

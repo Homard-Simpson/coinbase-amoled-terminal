@@ -300,4 +300,8 @@ HTTP mutation rejection.
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE).
+Original bridge software is licensed under GNU AGPL-3.0-or-later; see
+[LICENSE](LICENSE). The AGPL network-source obligations matter when a modified
+bridge is offered as a network service. AGPL-compliant commercial use and resale
+remain allowed without royalty. Optional proprietary exceptions are described in
+[commercial licensing](../COMMERCIAL-LICENSING.md).
