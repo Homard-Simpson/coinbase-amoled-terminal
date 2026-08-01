@@ -81,16 +81,40 @@ The helper writes bootloader, partition table, initial OTA metadata, and the app
 
 ## First-boot onboarding
 
-1. Flash the correct V1 or V2 image and reboot.
-2. The AMOLED shows `FIRST-BOOT SETUP`, a unique `AMOLED-Terminal-xxxx` SSID, and its random WPA2 password.
-3. Join that Wi-Fi network and open `http://192.168.4.1` if the captive page does not appear automatically.
-4. Copy the generated UUID shown in the portal. Register/allowlist it in the local bridge and issue a unique, revocable bearer token for only that device.
-5. Enter Wi-Fi, the complete bridge feed URL, and that bridge-issued token. Do **not** enter exchange API credentials.
-6. Save. The device commits configuration to NVS, restarts, joins Wi-Fi, and begins polling.
+The consumer installer writes a short-lived setup session to the dedicated
+`onboarding` data partition over USB. That partition contains only loopback setup
+URLs, opaque session/authorization/CSRF values, the non-secret bridge feed URL,
+and an expiry. It never contains Coinbase JSON, a Coinbase key name or PEM, Wi-Fi,
+a device token, a MAC address, or personal infrastructure.
 
-If saved Wi-Fi cannot connect for 45 seconds, the protected setup AP returns while station retries continue. Leave the SSID blank in the portal to keep existing Wi-Fi; leave the token blank to keep an existing token.
+1. Flash the exact V1 or V2 image and USB onboarding partition, then reboot.
+2. The AMOLED shows `FIRST-BOOT SETUP`, a unique `AMOLED-Terminal-xxxx` SSID, and
+   its random WPA2 password.
+3. Join that Wi-Fi and open `http://192.168.4.1` if the captive page does not
+   appear automatically.
+4. Enter home Wi-Fi and choose or paste the Coinbase CDP ECDSA JSON. Portal
+   JavaScript sends the JSON directly to the authenticated localhost bridge; it
+   never posts it to the ESP `/save` handler.
+5. The bridge returns only a local feed URL, UUIDv4 device ID, and revocable
+   `cbat_` feed token. The browser posts those safe values plus Wi-Fi to `/save`.
+6. Firmware commits only those allowlisted fields to NVS, erases the one-time
+   onboarding partition, restarts, joins Wi-Fi, and begins polling.
 
-The logical onboarding fields are documented in [`config/runtime-config.schema.json`](config/runtime-config.schema.json). The device accepts them through the portal and does not read a JSON config file.
+The `/save` parser rejects unknown and duplicate fields, malformed percent
+encoding, oversized bodies and values, credential-like field names, and private
+key markers before changing NVS. If a captive mini-browser cannot contact
+localhost, it offers a same-computer fallback URL. The fallback does not make
+phone-only onboarding possible.
+
+If saved Wi-Fi cannot connect for 45 seconds, the protected setup AP returns while
+station retries continue. A source-built image without valid USB onboarding
+metadata retains the advanced manual portal: leave SSID or token blank only when
+intentionally keeping an existing value, and never enter Coinbase credentials in
+manual bridge fields.
+
+The logical persistent fields are documented in
+[`config/runtime-config.schema.json`](config/runtime-config.schema.json). The
+firmware accepts them through the portal and does not read a JSON config file.
 
 ## Local bridge contract
 
@@ -128,7 +152,10 @@ A failed or interrupted upload leaves the running slot selected. Bootloader roll
 
 ### From the protected portal
 
-Hold BOOT for 10 seconds, join the setup AP, open the portal, type `RESET` in the Factory reset section, and submit. This clears Wi-Fi, bridge URL/token, device UUID, and setup password, then restarts into onboarding. Firmware and OTA slots remain intact.
+Hold BOOT for 10 seconds, join the setup AP, open the portal, type `RESET` in
+the Factory reset section, and submit. This clears Wi-Fi, bridge URL/token,
+device UUID, setup password, and the dedicated one-time onboarding partition,
+then restarts. Firmware and OTA slots remain intact.
 
 ### From USB
 
@@ -136,7 +163,9 @@ Hold BOOT for 10 seconds, join the setup AP, open the portal, type `RESET` in th
 ./scripts/factory-reset.sh /dev/cu.usbmodemXXXX --confirm=RESET
 ```
 
-This erases only the NVS partition at `0x9000` (size `0x6000`). Reflashing without erasing NVS is not a factory reset.
+This erases only NVS at `0x9000` (size `0x6000`) and the onboarding partition at
+`0xE20000` (size `0x2000`). Reflashing without those explicit erases is not a
+factory reset.
 
 ## Host tests
 

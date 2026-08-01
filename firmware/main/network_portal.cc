@@ -26,6 +26,7 @@
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
 #include "nvs.h"
+#include "onboarding_metadata.h"
 #include "runtime_config.h"
 
 namespace {
@@ -100,6 +101,27 @@ std::string HtmlEscape(std::string_view value) {
     return out;
 }
 
+std::string JsonString(std::string_view value) {
+    static constexpr char hex[] = "0123456789abcdef";
+    std::string out = "\"";
+    out.reserve(value.size() + 12);
+    for (unsigned char character : value) {
+        if (character == '\\' || character == '\"') {
+            out.push_back('\\');
+            out.push_back(static_cast<char>(character));
+        } else if (character < 0x20 || character == '<' || character == '>' ||
+                   character == '&') {
+            out += "\\u00";
+            out.push_back(hex[character >> 4]);
+            out.push_back(hex[character & 0x0f]);
+        } else {
+            out.push_back(static_cast<char>(character));
+        }
+    }
+    out.push_back('\"');
+    return out;
+}
+
 std::string UrlDecode(const std::string& value) {
     std::string out;
     out.reserve(value.size());
@@ -156,12 +178,60 @@ bool IsApClient(httpd_req_t* req) {
     return bytes[0] == 192 && bytes[1] == 168 && bytes[2] == 4;
 }
 
-void SetSecurityHeaders(httpd_req_t* req) {
+std::string RequestHeader(httpd_req_t* req, const char* name, size_t maximum = 320) {
+    const size_t length = httpd_req_get_hdr_value_len(req, name);
+    if (length == 0 || length >= maximum) return {};
+    std::string value(length + 1, '\0');
+    if (httpd_req_get_hdr_value_str(req, name, value.data(), value.size()) != ESP_OK)
+        return {};
+    value.resize(length);
+    return value;
+}
+
+bool CanonicalPortalHost(httpd_req_t* req) {
+    const std::string host = RequestHeader(req, "Host", 64);
+    return host == "192.168.4.1" || host == "192.168.4.1:80";
+}
+
+void SetSecurityHeaders(httpd_req_t* req, std::string_view connect_origin = {}) {
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "Pragma", "no-cache");
     httpd_resp_set_hdr(req, "X-Content-Type-Options", "nosniff");
     httpd_resp_set_hdr(req, "Referrer-Policy", "no-referrer");
+    httpd_resp_set_hdr(req, "X-Frame-Options", "DENY");
+    httpd_resp_set_hdr(req, "Permissions-Policy",
+                       "camera=(), microphone=(), geolocation=()");
+    static constexpr char kPortalPolicy[] =
+        "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
+        "connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
+    static constexpr char kOnboardingPolicy[] =
+        "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
+        "connect-src 'self' http://127.0.0.1:*; form-action 'self'; base-uri 'none'; "
+        "frame-ancestors 'none'";
     httpd_resp_set_hdr(req, "Content-Security-Policy",
-                       "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'");
+                       connect_origin.empty() ? kPortalPolicy : kOnboardingPolicy);
+}
+
+bool IsFormContentType(httpd_req_t* req) {
+    return RequestHeader(req, "Content-Type", 96) ==
+           "application/x-www-form-urlencoded";
+}
+
+bool SetSaveCorsHeaders(httpd_req_t* req, const std::string& origin,
+                        const OnboardingMetadataSnapshot& setup,
+                        bool preflight = false) {
+    if (origin.empty() || origin == "http://192.168.4.1") return true;
+    if (!setup.IsAvailable() || origin != setup.endpoint_origin) return false;
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", origin.c_str());
+    httpd_resp_set_hdr(req, "Vary", "Origin");
+    if (preflight) {
+        httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "POST");
+        httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
+        httpd_resp_set_hdr(req, "Access-Control-Max-Age", "0");
+        if (RequestHeader(req, "Access-Control-Request-Private-Network", 16) == "true")
+            httpd_resp_set_hdr(req, "Access-Control-Allow-Private-Network", "true");
+    }
+    return true;
 }
 
 bool ReadRequestBody(httpd_req_t* req, std::string* body) {
@@ -177,10 +247,28 @@ bool ReadRequestBody(httpd_req_t* req, std::string* body) {
     return true;
 }
 
+std::string RenderUsbOnboardingHtml(const OnboardingMetadataSnapshot& setup) {
+    const std::string portal_csrf = NetworkPortal::GetInstance().GetCsrfToken();
+    std::string html = R"HTML(<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AMOLED Terminal Setup</title><style>body{font:16px system-ui;background:#07101f;color:#f5f7fa;max-width:560px;margin:28px auto;padding:0 18px}section{background:#121826;padding:22px;border-radius:14px}label{display:block;margin-top:13px}input,textarea,button{box-sizing:border-box;width:100%;padding:12px;margin:6px 0;border-radius:8px;border:1px solid #526079}textarea{min-height:120px}button{background:#377eff;color:white;font-weight:700}small,.muted{color:#b8c1d1}#status{white-space:pre-wrap}.fallback{display:none}a{color:#8ab4ff}</style></head><body><h1>Connect your display</h1><p class="muted">Add home Wi-Fi and a view-only Coinbase key. The key goes straight to the bridge on this computer. This display never receives it.</p><section><form id="setup" autocomplete="off"><label>Home Wi-Fi name</label><input id="ssid" maxlength="32" autocomplete="off" required><label>Home Wi-Fi password</label><input id="wifiPassword" type="password" maxlength="64" autocomplete="new-password"><label>Coinbase CDP ECDSA API-key JSON</label><textarea id="keyText" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste the downloaded JSON"></textarea><input id="keyFile" type="file" accept="application/json,.json" autocomplete="off"><small>Unsafe keys with trade or transfer permission are rejected.</small><button id="finish" type="submit">Finish</button><p id="status" aria-live="polite"></p><p class="fallback" id="fallback">The captive window could not reach this computer. <a href=")HTML";
+    html += HtmlEscape(setup.local_page_url);
+    html += R"HTML(" target="_blank" rel="noreferrer noopener">Continue on this computer</a>. If the key check needs internet, reconnect this computer to its usual network there, then return to this display Wi-Fi.</p></form></section><script>'use strict';const endpoint=)HTML";
+    html += JsonString(setup.endpoint_url);
+    html += ",provisionEndpoint=" + JsonString(setup.endpoint_origin + "/v1/onboarding/provisioning");
+    html += ",finishEndpoint=" + JsonString(setup.endpoint_origin + "/v1/onboarding/finish");
+    html += ",sessionId=" + JsonString(setup.session_id);
+    html += ",setupToken=" + JsonString(setup.setup_token);
+    html += ",setupCsrf=" + JsonString(setup.csrf_token);
+    html += ",portalCsrf=" + JsonString(portal_csrf) + ";";
+    html += R"HTML(const baseHeaders=()=>({'Authorization':'Setup '+setupToken,'X-Setup-Session':sessionId,'X-CSRF-Token':setupCsrf});async function keyDocument(){const f=document.getElementById('keyFile').files[0];return f?await f.text():document.getElementById('keyText').value}async function completedProvisioning(){const r=await fetch(provisionEndpoint,{method:'POST',mode:'cors',cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer',headers:baseHeaders()});if(!r.ok)throw new Error('not-ready');return r.json()}async function checkKey(key){const headers=baseHeaders();headers['Content-Type']='application/json';const r=await fetch(endpoint,{method:'POST',mode:'cors',cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer',headers,body:key});if(!r.ok)throw new Error('key');return r.json()}async function saveOnlySafeValues(p){const body=new URLSearchParams();body.set('csrf',portalCsrf);body.set('ssid',document.getElementById('ssid').value);body.set('password',document.getElementById('wifiPassword').value);body.set('bridge_url',p.bridge_url);body.set('device_id',p.device_id);body.set('bridge_token',p.feed_token);const r=await fetch('/save',{method:'POST',cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body.toString()});if(!r.ok)throw new Error('save')}async function acknowledge(){const r=await fetch(finishEndpoint,{method:'POST',mode:'cors',cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer',headers:baseHeaders()});if(!r.ok)throw new Error('finish')}document.getElementById('setup').addEventListener('submit',async e=>{e.preventDefault();const out=document.getElementById('status'),button=document.getElementById('finish');button.disabled=true;out.textContent='Checking the read-only key…';try{let key=await keyDocument();document.getElementById('keyText').value='';document.getElementById('keyFile').value='';let p;if(key.trim()){p=await checkKey(key);key=''}else{out.textContent='Getting the completed key check from this computer…';p=await completedProvisioning()}await saveOnlySafeValues(p);await acknowledge();document.getElementById('wifiPassword').value='';out.textContent='Setup complete. The display is restarting.'}catch(_error){out.textContent='Setup could not be completed here. Continue on this computer, then return and press Finish with the key field empty.';document.getElementById('fallback').style.display='block';button.disabled=false}});</script></body></html>)HTML";
+    return html;
+}
+
 std::string RenderPortalHtml() {
     auto& portal = NetworkPortal::GetInstance();
     const RuntimeConfigSnapshot runtime = RuntimeConfig::GetInstance().Snapshot();
     const bool configured = runtime.IsProvisioned();
+    const OnboardingMetadataSnapshot setup = OnboardingMetadata::GetInstance().Snapshot();
+    if (setup.IsAvailable()) return RenderUsbOnboardingHtml(setup);
     const bool has_wifi = portal.HasSavedNetwork();
     const std::string current_url = HtmlEscape(runtime.bridge_url);
     const std::string device_id = HtmlEscape(runtime.device_id);
@@ -192,16 +280,18 @@ std::string RenderPortalHtml() {
         ? "Leave network name blank to keep saved Wi-Fi"
         : "Required on first boot";
 
-    std::string html = R"HTML(<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>AMOLED Terminal Setup</title><style>body{font:16px system-ui;background:#07101f;color:#f5f7fa;max-width:560px;margin:28px auto;padding:0 18px}section{background:#121826;padding:20px;border-radius:14px;margin:16px 0}input,button{box-sizing:border-box;width:100%;padding:12px;margin:7px 0;border-radius:8px;border:1px solid #526079}button{background:#377eff;color:white;font-weight:700}.danger{background:#a61b29}small,.muted{color:#b8c1d1}code{overflow-wrap:anywhere}.status{white-space:pre-wrap}</style></head><body><h1>AMOLED Terminal</h1><p class="muted">Unofficial read-only display setup. This page is reachable only through the device setup access point.</p><section><h2>Device identity</h2><p>Register this generated ID with your local bridge:</p><code>)HTML";
+    std::string html = R"HTML(<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>AMOLED Terminal Setup</title><style>body{font:16px system-ui;background:#07101f;color:#f5f7fa;max-width:560px;margin:28px auto;padding:0 18px}section{background:#121826;padding:20px;border-radius:14px;margin:16px 0}input,button{box-sizing:border-box;width:100%;padding:12px;margin:7px 0;border-radius:8px;border:1px solid #526079}button{background:#377eff;color:white;font-weight:700}.danger{background:#a61b29}small,.muted{color:#b8c1d1}code{overflow-wrap:anywhere}.status{white-space:pre-wrap}</style></head><body><h1>AMOLED Terminal</h1><p class="muted">Advanced manual bridge setup. Never enter a Coinbase API key on this display.</p><section><h2>Device identity</h2><p>Register this generated ID with your local bridge:</p><code>)HTML";
     html += device_id;
     html += "</code><p class=\"muted\">This is not a hardware MAC address and is not an exchange credential.</p></section>";
-    html += R"HTML(<section><h2>Connection</h2><form method="post" action="/save"><input type="hidden" name="csrf" value=")HTML";
+    html += R"HTML(<section><h2>Connection</h2><form method="post" action="/save" autocomplete="off"><input type="hidden" name="csrf" value=")HTML";
     html += csrf;
     html += R"HTML("><label>Wi-Fi network name</label><input name="ssid" maxlength="32" autocomplete="off"><small>)HTML";
     html += wifi_hint;
     html += R"HTML(</small><label>Wi-Fi password</label><input name="password" type="password" maxlength="64" autocomplete="new-password"><label>Bridge feed URL</label><input name="bridge_url" type="url" maxlength="255" required value=")HTML";
     html += current_url;
-    html += R"HTML(" placeholder="https://bridge.example.invalid/feed"><small>HTTPS is accepted anywhere. Plain HTTP is limited to private, local, or tailnet hosts.</small><label>Bridge bearer token</label><input name="bridge_token" type="password" maxlength="512" autocomplete="new-password"><small>)HTML";
+    html += R"HTML(" placeholder="https://bridge.example.invalid/feed"><input type="hidden" name="device_id" value=")HTML";
+    html += device_id;
+    html += R"HTML("><small>HTTPS is accepted anywhere. Plain HTTP is limited to private, local, or tailnet hosts.</small><label>Bridge bearer token</label><input name="bridge_token" type="password" maxlength="512" autocomplete="new-password"><small>)HTML";
     html += token_hint;
     html += R"HTML(. Never enter Coinbase API keys here.</small><button>Save and restart</button></form></section><section><h2>Firmware update</h2><p>OTA is disabled unless physically armed. Hold BOOT for 10 seconds, then enter the six-digit code shown on the display.</p><input id="code" inputmode="numeric" maxlength="6" placeholder="One-time code"><input id="file" type="file" accept=".bin,application/octet-stream"><button type="button" onclick="uploadFirmware()">Install firmware</button><div class="status" id="out"></div><small>Use the image for this exact board revision. The inactive slot is selected only after full ESP-IDF image validation.</small></section><section><h2>Factory reset</h2><p>Erases Wi-Fi, bridge URL, bridge token, generated device ID, and setup password. Firmware remains installed.</p><form method="post" action="/factory-reset"><input type="hidden" name="csrf" value=")HTML";
     html += csrf;
@@ -216,6 +306,7 @@ void RestartTask(void*) {
 
 void FactoryResetTask(void*) {
     vTaskDelay(pdMS_TO_TICKS(1500));
+    OnboardingMetadata::GetInstance().Clear();
     for (const char* name : {"wifi", "terminal"}) {
         nvs_handle_t nvs = 0;
         if (nvs_open(name, NVS_READWRITE, &nvs) == ESP_OK) {
@@ -227,11 +318,15 @@ void FactoryResetTask(void*) {
     esp_restart();
 }
 
+esp_err_t RedirectHandler(httpd_req_t* req);
+
 esp_err_t RootHandler(httpd_req_t* req) {
     if (!IsApClient(req)) return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "AP clients only");
+    if (!CanonicalPortalHost(req)) return RedirectHandler(req);
     const std::string html = RenderPortalHtml();
+    const OnboardingMetadataSnapshot setup = OnboardingMetadata::GetInstance().Snapshot();
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    SetSecurityHeaders(req);
+    SetSecurityHeaders(req, setup.IsAvailable() ? setup.endpoint_origin : "");
     return httpd_resp_send(req, html.c_str(), html.size());
 }
 
@@ -245,39 +340,74 @@ esp_err_t RedirectHandler(httpd_req_t* req) {
 
 esp_err_t SaveHandler(httpd_req_t* req) {
     auto& portal = NetworkPortal::GetInstance();
+    const std::string origin = RequestHeader(req, "Origin", 320);
+    const OnboardingMetadataSnapshot setup = OnboardingMetadata::GetInstance().Snapshot();
+    SetSecurityHeaders(req);
     if (!IsApClient(req)) return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "AP clients only");
+    if (!CanonicalPortalHost(req) || !SetSaveCorsHeaders(req, origin, setup) ||
+        !IsFormContentType(req))
+        return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "Setup request refused");
     std::string body;
     if (!ReadRequestBody(req, &body)) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid form");
-    if (FormValue(body, "csrf") != portal.GetCsrfToken())
+    std::string reason;
+    if (!terminal::validation::SafeProvisioningForm(body, &reason))
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid setup details");
+
+    const bool localhost_fallback = setup.IsAvailable() && origin == setup.endpoint_origin;
+    const bool csrf_valid = localhost_fallback
+        ? FormValue(body, "setup_csrf") == setup.csrf_token
+        : FormValue(body, "csrf") == portal.GetCsrfToken();
+    if (!csrf_valid)
         return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "Expired setup form; reload and try again");
 
     const std::string ssid = FormValue(body, "ssid");
     const std::string password = FormValue(body, "password");
     const std::string bridge_url = FormValue(body, "bridge_url");
+    const std::string device_id = FormValue(body, "device_id");
     const std::string bridge_token = FormValue(body, "bridge_token");
-    std::string reason;
     if (!ssid.empty() && !terminal::validation::WifiCredential(ssid, password, &reason))
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, reason.c_str());
     if (ssid.empty() && !portal.HasSavedNetwork())
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Wi-Fi network name is required on first setup");
 
-    esp_err_t err = RuntimeConfig::GetInstance().SaveBridge(bridge_url, bridge_token, &reason);
+    esp_err_t err = RuntimeConfig::GetInstance().SaveProvisioning(
+        bridge_url, device_id, bridge_token, &reason);
     if (err == ESP_ERR_INVALID_ARG)
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, reason.c_str());
     if (err != ESP_OK)
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Unable to store bridge configuration");
     if (!ssid.empty() && portal.SaveCredential(ssid, password) != ESP_OK)
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Unable to store Wi-Fi configuration");
+    if (setup.IsAvailable() && OnboardingMetadata::GetInstance().Clear() != ESP_OK)
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "Unable to close one-time setup");
 
     httpd_resp_set_type(req, "text/plain");
+    SetSaveCorsHeaders(req, origin, setup);
     SetSecurityHeaders(req);
     httpd_resp_sendstr(req, "Configuration saved. The display is restarting.");
     xTaskCreate(RestartTask, "setup_restart", 2048, nullptr, 5, nullptr);
     return ESP_OK;
 }
 
+esp_err_t SaveOptionsHandler(httpd_req_t* req) {
+    const std::string origin = RequestHeader(req, "Origin", 320);
+    const OnboardingMetadataSnapshot setup = OnboardingMetadata::GetInstance().Snapshot();
+    SetSecurityHeaders(req);
+    if (!IsApClient(req) || !CanonicalPortalHost(req) ||
+        !SetSaveCorsHeaders(req, origin, setup, true) ||
+        RequestHeader(req, "Access-Control-Request-Method", 16) != "POST" ||
+        RequestHeader(req, "Access-Control-Request-Headers", 64) != "content-type") {
+        return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "Setup request refused");
+    }
+    SetSecurityHeaders(req);
+    httpd_resp_set_status(req, "204 No Content");
+    return httpd_resp_send(req, nullptr, 0);
+}
+
 esp_err_t FactoryResetHandler(httpd_req_t* req) {
     auto& portal = NetworkPortal::GetInstance();
+    SetSecurityHeaders(req);
     if (!IsApClient(req)) return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "AP clients only");
     std::string body;
     if (!ReadRequestBody(req, &body)) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid form");
@@ -294,6 +424,7 @@ esp_err_t FactoryResetHandler(httpd_req_t* req) {
 
 esp_err_t OtaHandler(httpd_req_t* req) {
     auto& portal = NetworkPortal::GetInstance();
+    SetSecurityHeaders(req);
     if (!IsApClient(req)) return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "AP clients only");
     if (!portal.IsOtaArmed()) return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "OTA is not physically armed");
     char code[16]{};
@@ -523,7 +654,8 @@ void NetworkPortal::Initialize(std::function<void(bool)> connection_callback,
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, EventHandler, this));
 
     const bool setup_required = !RuntimeConfig::GetInstance().IsProvisioned();
-    const bool start_portal = !HasSavedNetwork() || setup_required;
+    const bool usb_onboarding = OnboardingMetadata::GetInstance().IsAvailable();
+    const bool start_portal = !HasSavedNetwork() || setup_required || usb_onboarding;
     ESP_ERROR_CHECK(esp_wifi_set_mode(start_portal ? WIFI_MODE_APSTA : WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
 
@@ -551,7 +683,8 @@ void NetworkPortal::EventHandler(void* arg, const char* event_base, int32_t even
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         self->connected_ = true;
         if (connection_timer) esp_timer_stop(connection_timer);
-        if (!self->ota_armed_ && RuntimeConfig::GetInstance().IsProvisioned()) self->StopPortal();
+        if (!self->ota_armed_ && RuntimeConfig::GetInstance().IsProvisioned() &&
+            !OnboardingMetadata::GetInstance().IsAvailable()) self->StopPortal();
         if (self->connection_callback_) self->connection_callback_(true);
         self->NotifyState();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED &&
@@ -637,6 +770,10 @@ void NetworkPortal::StartPortal() {
     httpd_uri_t save{};
     save.uri = "/save"; save.method = HTTP_POST; save.handler = SaveHandler;
     ESP_ERROR_CHECK(httpd_register_uri_handler(http_server, &save));
+    httpd_uri_t save_options{};
+    save_options.uri = "/save"; save_options.method = HTTP_OPTIONS;
+    save_options.handler = SaveOptionsHandler;
+    ESP_ERROR_CHECK(httpd_register_uri_handler(http_server, &save_options));
     httpd_uri_t reset{};
     reset.uri = "/factory-reset"; reset.method = HTTP_POST; reset.handler = FactoryResetHandler;
     ESP_ERROR_CHECK(httpd_register_uri_handler(http_server, &reset));

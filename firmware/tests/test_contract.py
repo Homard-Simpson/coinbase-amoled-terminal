@@ -48,6 +48,42 @@ class ContractTests(unittest.TestCase):
         self.assertNotIn("FEED_" + "URL", main)
         self.assertNotIn("DEVICE_" + "ID", main)
 
+    def test_usb_onboarding_partition_and_esp_payload_exclude_coinbase_key(self):
+        partitions = (ROOT / "partitions.csv").read_text(encoding="utf-8")
+        portal = (ROOT / "main/network_portal.cc").read_text(encoding="utf-8")
+        metadata = (ROOT / "main/onboarding_metadata.cc").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("onboarding, data, 0x40,    0xE20000, 0x2000", partitions)
+        self.assertIn("kMagic", metadata)
+        self.assertIn("{'C', 'B', 'A', 'T', 'S', 'T', '0', '1'}", metadata)
+        self.assertIn("mbedtls_sha256(", metadata)
+        self.assertIn("OnboardingMetadata::GetInstance().Clear()", portal)
+        self.assertIn("SafeProvisioningForm", portal)
+        reset_script = (ROOT / "scripts/factory-reset.sh").read_text(encoding="utf-8")
+        self.assertIn("erase_region 0x9000 0x6000", reset_script)
+        self.assertIn("erase_region 0xE20000 0x2000", reset_script)
+
+        start = portal.index("async function saveOnlySafeValues")
+        end = portal.index("async function acknowledge", start)
+        esp_request_builder = portal[start:end]
+        self.assertIn("bridge_url", esp_request_builder)
+        self.assertIn("device_id", esp_request_builder)
+        self.assertIn("bridge_token", esp_request_builder)
+        self.assertNotIn("private" + "Key", esp_request_builder)
+        self.assertNotIn("api" + "Key", esp_request_builder)
+        self.assertNotIn("PRIVATE " + "KEY-----", esp_request_builder)
+
+    def test_physical_button_contract_and_v2_pmu_guard_are_unchanged(self):
+        main = (ROOT / "main/main.cc").read_text(encoding="utf-8")
+        self.assertIn("now-button_at>=10000", main)
+        self.assertIn("held>=750", main)
+        self.assertIn("#if BOARD_IS_V1", main)
+        v1_start = main.index("static const uint8_t axp_seq")
+        v2_boundary = main.index("#else", v1_start)
+        self.assertIn("i2c_master_transmit", main[v1_start:v2_boundary])
+        self.assertNotIn("i2c_master_transmit", main[v2_boundary:main.index("#endif", v2_boundary)])
+
     def test_no_private_literals_or_publishable_artifacts(self):
         old_private_token_name = "coinbase" + "-epaper-token"
         forbidden_text = re.compile(

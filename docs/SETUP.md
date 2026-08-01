@@ -3,43 +3,55 @@
 This guide describes a safe baseline. Component-specific flags may evolve before
 1.0; check `bridge/README.md` and `firmware/README.md` for implementation details.
 
-## Preflashed hardware: two steps
+## Consumer setup: two steps
+
+> **Release block:** this exact flow is implemented for review, but production
+> firmware manifests have not been published. Do not use or advertise the public
+> one-line installer until V1 and V2 hardware verification is complete.
 
 ### Step 1
 
-On macOS or mainstream Linux, run:
+Plug in one display with a USB data cable. For an approved firmware release, run
+one command from the checked-out installer:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Homard-Simpson/coinbase-amoled-terminal/main/install.sh | bash
+./install.sh --version vX.Y.Z
 ```
 
-Python 3.11+ and Git are required. The installer does not use Docker, modify shell
-startup files, request administrator access, or invoke `sudo`. Application source
-comes only from this exact repository's `main` branch; isolated pip installs the
-declared runtime dependency from official PyPI. It then writes a per-user service
-and opens the secure quickstart prompt.
+The installer requires Python 3.11+ and Git. It finds exactly one likely USB
+serial device, creates an isolated Python/esptool environment, verifies a
+versioned release manifest and every SHA-256 artifact, installs the local bridge
+without Docker or administrator access, flashes only declared firmware regions,
+and writes a short-lived setup session to the dedicated onboarding partition.
+It does not erase unrelated NVS.
+
+If the existing device contains an official image whose exact flash hash appears
+in the release manifest, that trusted hash identifies V1 or V2. No other USB,
+chip, flash-size, serial-name, or hardware-probe signal is accepted. When a blank
+or DIY board cannot be identified, the installer asks once for V1 or V2 and links
+to the vendor's visual guide. It selects neither by default and fails closed in
+non-interactive mode.
 
 ### Step 2
 
-Paste the complete Coinbase CDP ECDSA key JSON at the hidden prompt, or drag the
-downloaded JSON file into the terminal, and press Enter. Minified one-line JSON
-and file paths with spaces are accepted. The JSON must contain Coinbase's `name`
-and `privateKey` fields. Legacy secrets, Ed25519 keys, and any curve other than
-P-256/ES256 are rejected.
+Join the protected setup Wi-Fi shown on the display. Its captive portal asks for
+home Wi-Fi and the downloaded Coinbase CDP ECDSA JSON. Press **Finish**.
 
-Before anything is stored, quickstart calls Coinbase's read-only
-`/key_permissions` endpoint. It proceeds only when view access is enabled and
-trade and transfer access are both disabled. The key name and private PEM are
-then written atomically to owner-only files. A separate display ID/token is
-created, the user service is started, and `doctor` repeats the live safety gate.
-A failed safety check rolls back state created by that attempt when it is safe to
-do so.
+Portal JavaScript sends that Coinbase JSON directly from the browser to an
+authenticated localhost-only endpoint on this computer. It is never submitted
+to `/save`, and the ESP cannot read it. The localhost bridge validates P-256
+key material, calls `/key_permissions`, refuses trade or transfer capability,
+then atomically stores the key name and private PEM in an owner-only credential
+bundle. A failed validation stores nothing.
 
-Quickstart prints the trusted-LAN feed URL, display ID, and protected token-file
-path. It never prints the key or token itself. Enter those pairing values in the
-preflashed display's setup screen. Do not use the trusted-LAN HTTP URL on a hotel,
-guest, public, or otherwise untrusted network; use private HTTPS/tailnet ingress
-instead.
+The browser sends the ESP only home Wi-Fi, the local feed URL, a UUIDv4 device
+ID, and a random revocable `cbat_` token. The setup and CSRF tokens are
+short-lived, single-use, and carried in request headers—not URLs. The local
+service binds only to `127.0.0.1`, accepts only exact portal/localhost origins and
+CORS/PNA preflights, and uses no cookies, external assets, analytics, autocomplete,
+or browser storage. If a captive mini-browser blocks localhost, the portal opens
+a same-computer localhost fallback page backed by the same session. See
+[Secure two-step onboarding](SECURE_ONBOARDING.md) for the complete boundary.
 
 The installer writes these per-user components:
 
@@ -50,34 +62,34 @@ The installer writes these per-user components:
 - a convenience command at `~/.local/bin/coinbase-amoled-bridge` when that path is
   available without replacing an existing file.
 
-If launchd or `systemd --user` is unavailable, setup still validates and stores
-the configuration, then prints an exact foreground command. Resolve the user
-service/session issue or keep that foreground process running while the display
-is in use.
+If launchd or `systemd --user` cannot start, setup stops before provisioning the
+display and rolls back new local state. Fix the user service/session, then run the
+same install line again.
 
-Offline sample install:
+Offline sample install from a checked-out source tree:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Homard-Simpson/coinbase-amoled-terminal/main/install.sh | bash -s -- --sample
+./install.sh --sample
 ```
 
-Idempotent update: rerun the Step 1 command. The installer fast-forwards a clean
-checkout, refreshes the virtual environment and service template, revalidates an
-existing setup, and never replaces a different command or a modified checkout.
+Idempotent update: rerun the Step 1 command with a newer approved version. The
+installer refreshes its isolated environment and service template, validates the
+manifest before flashing, and never replaces a different command or modified
+checkout.
 
 Uninstall while retaining private state:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Homard-Simpson/coinbase-amoled-terminal/main/install.sh | bash -s -- --uninstall
+./install.sh --uninstall
 ```
 
 Append `--purge` to that command to explicitly delete credentials, configuration,
 and device tokens too.
 
-This flow is for the preflashed hardware package. **Source firmware builders:**
-continue with the advanced deployment and build steps below; the source firmware
-first-boot portal generates its own device ID, which must be registered with
-`coinbase-amoled-bridge device add --device-id <displayed-id>`.
+The public one-line command remains disabled because approved release assets do
+not yet exist. Reviewers may use `--manifest-url` only with the explicit
+`--allow-unverified-test-artifacts` acknowledgement. **Source firmware builders:**
+continue with the advanced steps below and choose the exact V1 or V2 revision.
 
 ## 1. Choose a deployment
 

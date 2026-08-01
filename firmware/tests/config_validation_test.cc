@@ -17,6 +17,7 @@ int main() {
     using terminal::validation::BearerToken;
     using terminal::validation::BridgeUrl;
     using terminal::validation::DeviceId;
+    using terminal::validation::SafeProvisioningForm;
     using terminal::validation::WifiCredential;
 
     Check(BridgeUrl("https://bridge.example.invalid/feed"), "HTTPS feed URL");
@@ -50,6 +51,28 @@ int main() {
 
     Check(DeviceId("123e4567-e89b-42d3-a456-426614174000"), "UUIDv4 device ID");
     Check(!DeviceId("123e4567-e89b-12d3-a456-426614174000"), "non-v4 UUID must fail");
+
+    const std::string safe_form =
+        "csrf=abc&ssid=Home&password=correct-horse&"
+        "bridge_url=http%3A%2F%2F100.100.20.10%3A8788%2Fv1%2Fdevice-feed&"
+        "device_id=123e4567-e89b-42d3-a456-426614174000&"
+        "bridge_token=cbat_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    Check(SafeProvisioningForm(safe_form), "safe provisioning form");
+    Check(SafeProvisioningForm(
+              "setup_csrf=abc&ssid=Home&password=correct-horse&"
+              "bridge_url=http%3A%2F%2F100.100.20.10%3A8788%2Fv1%2Fdevice-feed&"
+              "device_id=123e4567-e89b-42d3-a456-426614174000&"
+              "bridge_token=cbat_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+          "localhost fallback provisioning form");
+    Check(!SafeProvisioningForm(safe_form + "&privateKey=forbidden"),
+          "API key field must never reach ESP save");
+    Check(!SafeProvisioningForm(safe_form + "&ssid=duplicate"),
+          "duplicate ESP fields must fail");
+    Check(!SafeProvisioningForm(
+              "ssid=Home&password=-----BEGIN%20PRIVATE%20KEY-----&"
+              "bridge_url=http%3A%2F%2F100.100.20.10%3A8788%2Fv1%2Fdevice-feed&"
+              "device_id=123e4567-e89b-42d3-a456-426614174000&bridge_token=token"),
+          "private key material must never reach ESP save");
 
     std::cout << "config validation tests passed\n";
     return 0;

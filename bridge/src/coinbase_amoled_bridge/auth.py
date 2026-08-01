@@ -11,6 +11,7 @@ import json
 import os
 import re
 import secrets
+import struct
 import tempfile
 import threading
 import time
@@ -33,6 +34,9 @@ KEY_NAME_FILE_ENV = "COINBASE_API_KEY_NAME_FILE"
 PRIVATE_KEY_FILE_ENV = "COINBASE_API_PRIVATE_KEY_FILE"
 MAX_KEY_NAME_BYTES = 2_048
 MAX_PRIVATE_KEY_BYTES = 65_536
+MAX_CREDENTIAL_BUNDLE_BYTES = MAX_KEY_NAME_BYTES + MAX_PRIVATE_KEY_BYTES + 64
+CREDENTIAL_BUNDLE_MAGIC = b"CBATCRD1"
+CREDENTIAL_BUNDLE_FILE = "coinbase_credentials"
 DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{11,63}$")
 DEVICE_TOKEN_RE = re.compile(r"^cbat_[A-Za-z0-9_-]{43}$")
 DUMMY_TOKEN_DIGEST = hashlib.sha256(b"bridge-auth-dummy-value").hexdigest()
@@ -66,6 +70,9 @@ class Credentials:
     @classmethod
     def load_local(cls, data_dir: str | os.PathLike[str]) -> Credentials:
         data_path = Path(data_dir).expanduser().resolve()
+        bundle_path = data_path / "secrets" / CREDENTIAL_BUNDLE_FILE
+        if bundle_path.is_file():
+            return _read_credential_bundle(bundle_path)
         key_name_bytes = _read_secret_file(
             data_path / "secrets" / "coinbase_api_key_name", MAX_KEY_NAME_BYTES
         )
@@ -94,6 +101,7 @@ class Credentials:
         data_path = Path(data_dir).expanduser().resolve()
         local_key_name = data_path / "secrets" / "coinbase_api_key_name"
         local_private_key = data_path / "secrets" / "coinbase_api_private_key"
+        local_bundle = data_path / "secrets" / CREDENTIAL_BUNDLE_FILE
         docker_key_name = Path("/run/secrets/coinbase_api_key_name")
         docker_private_key = Path("/run/secrets/coinbase_api_private_key")
 
@@ -127,6 +135,8 @@ class Credentials:
                 docker_private_key, MAX_PRIVATE_KEY_BYTES
             )
             source = "docker_secrets"
+        elif local_bundle.is_file():
+            return _read_credential_bundle(local_bundle)
         elif local_key_name.is_file() and local_private_key.is_file():
             key_name_bytes = _read_secret_file(local_key_name, MAX_KEY_NAME_BYTES)
             private_key_bytes = _read_secret_file(
@@ -166,6 +176,57 @@ def _read_secret_file(path: Path, maximum_bytes: int) -> bytes:
     if b"\x00" in payload:
         raise CredentialError("credential secret file contains NUL bytes")
     return payload
+
+
+def _encode_credential_bundle(credentials: Credentials) -> bytes:
+    """Encode both credential values into one atomically replaceable file."""
+
+    name = credentials.key_name.encode("utf-8")
+    private_key = credentials.private_key_pem
+    return (
+        CREDENTIAL_BUNDLE_MAGIC
+        + struct.pack(">II", len(name), len(private_key))
+        + name
+        + private_key
+    )
+
+
+def _read_credential_bundle(path: Path) -> Credentials:
+    try:
+        if (
+            not path.is_file()
+            or not 1 <= path.stat().st_size <= MAX_CREDENTIAL_BUNDLE_BYTES
+        ):
+            raise CredentialError("local credential bundle is invalid")
+        payload = path.read_bytes()
+    except CredentialError:
+        raise
+    except OSError as exc:
+        raise CredentialError("local credential bundle is invalid") from exc
+    header_size = len(CREDENTIAL_BUNDLE_MAGIC) + 8
+    if len(payload) < header_size or not payload.startswith(CREDENTIAL_BUNDLE_MAGIC):
+        raise CredentialError("local credential bundle is invalid")
+    name_length, key_length = struct.unpack(
+        ">II", payload[len(CREDENTIAL_BUNDLE_MAGIC) : header_size]
+    )
+    if (
+        name_length < 1
+        or name_length > MAX_KEY_NAME_BYTES
+        or key_length < 1
+        or key_length > MAX_PRIVATE_KEY_BYTES
+        or header_size + name_length + key_length != len(payload)
+    ):
+        raise CredentialError("local credential bundle is invalid")
+    try:
+        key_name = payload[header_size : header_size + name_length].decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CredentialError("local credential bundle is invalid") from exc
+    private_key = payload[header_size + name_length :]
+    return Credentials.from_values(
+        key_name=key_name,
+        private_key_pem=private_key,
+        source="local_setup",
+    )
 
 
 def _b64url(payload: bytes) -> str:
@@ -550,6 +611,35 @@ def save_local_credentials(
             ) from rollback_error
         raise
     return key_name_path, private_key_path
+
+
+def save_local_credentials_atomic(
+    data_dir: str | os.PathLike[str],
+    *,
+    credentials: Credentials,
+    replace: bool = False,
+) -> Path:
+    """Store key name and PEM in one atomic, owner-only credential bundle.
+
+    The web onboarding path uses this format so another process can never observe
+    a new key name paired with an old PEM (or the reverse). Legacy two-file local
+    credentials remain readable for existing installations.
+    """
+
+    validated = Credentials.from_values(
+        key_name=credentials.key_name,
+        private_key_pem=credentials.private_key_pem,
+        source="local_setup",
+    )
+    destination = (
+        Path(data_dir).expanduser().resolve() / "secrets" / CREDENTIAL_BUNDLE_FILE
+    )
+    write_secret_atomic(
+        destination,
+        _encode_credential_bundle(validated),
+        replace=replace,
+    )
+    return destination
 
 
 def prompt_key_name() -> str:

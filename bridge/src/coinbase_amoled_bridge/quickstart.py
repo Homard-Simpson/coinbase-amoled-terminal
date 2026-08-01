@@ -58,28 +58,13 @@ def _dragged_path(value: str) -> Path:
     return Path(parts[0]).expanduser()
 
 
-def parse_cdp_key_input(value: str) -> Credentials:
-    """Parse one hidden prompt value without ever rendering it in an error."""
+def parse_cdp_key_json(raw: bytes) -> Credentials:
+    """Parse bounded downloaded JSON without rendering any input in an error."""
 
-    if not isinstance(value, str):
-        raise CredentialError("Coinbase key input must be text")
-    stripped = value.strip()
-    if not stripped:
-        raise CredentialError("Coinbase key JSON or file path is required")
-    try:
-        encoded = stripped.encode("utf-8")
-    except UnicodeEncodeError as exc:
-        raise CredentialError("Coinbase key input must be UTF-8") from exc
-    if b"\x00" in encoded:
-        raise CredentialError("Coinbase key input contains an invalid character")
-
-    if stripped.startswith("{"):
-        if len(encoded) > MAX_INPUT_LINE_BYTES:
-            raise CredentialError("Coinbase key JSON is too large")
-        raw = encoded
-    else:
-        raw = _read_json_file(_dragged_path(stripped))
-
+    if not isinstance(raw, bytes):
+        raise CredentialError("Coinbase key JSON must be bytes")
+    if not raw or len(raw) > MAX_CDP_JSON_BYTES or b"\x00" in raw:
+        raise CredentialError("Coinbase key JSON has an invalid size or content")
     try:
         parsed = json.loads(
             raw.decode("utf-8-sig"), object_pairs_hook=_reject_duplicate_fields
@@ -111,6 +96,30 @@ def parse_cdp_key_input(value: str) -> Credentials:
         private_key_pem=private_key.encode("utf-8"),
         source="quickstart",
     )
+
+
+def parse_cdp_key_input(value: str) -> Credentials:
+    """Parse one hidden prompt value without ever rendering it in an error."""
+
+    if not isinstance(value, str):
+        raise CredentialError("Coinbase key input must be text")
+    stripped = value.strip()
+    if not stripped:
+        raise CredentialError("Coinbase key JSON or file path is required")
+    try:
+        encoded = stripped.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise CredentialError("Coinbase key input must be UTF-8") from exc
+    if b"\x00" in encoded:
+        raise CredentialError("Coinbase key input contains an invalid character")
+
+    if stripped.startswith("{"):
+        if len(encoded) > MAX_INPUT_LINE_BYTES:
+            raise CredentialError("Coinbase key JSON is too large")
+        raw = encoded
+    else:
+        raw = _read_json_file(_dragged_path(stripped))
+    return parse_cdp_key_json(raw)
 
 
 def prompt_for_cdp_key() -> Credentials:

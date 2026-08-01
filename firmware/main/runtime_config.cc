@@ -137,9 +137,21 @@ bool RuntimeConfig::IsProvisioned() const {
 esp_err_t RuntimeConfig::SaveBridge(const std::string& bridge_url,
                                     const std::string& bearer_token,
                                     std::string* validation_error) {
+    return SaveProvisioning(bridge_url, Snapshot().device_id, bearer_token,
+                            validation_error);
+}
+
+esp_err_t RuntimeConfig::SaveProvisioning(const std::string& bridge_url,
+                                          const std::string& device_id,
+                                          const std::string& bearer_token,
+                                          std::string* validation_error) {
     std::string reason;
     if (!terminal::validation::BridgeUrl(bridge_url, &reason)) {
         if (validation_error) *validation_error = reason;
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!terminal::validation::DeviceId(device_id)) {
+        if (validation_error) *validation_error = "Device ID is invalid";
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -156,6 +168,7 @@ esp_err_t RuntimeConfig::SaveBridge(const std::string& bridge_url,
     esp_err_t err = nvs_open(kNamespace, NVS_READWRITE, &nvs);
     if (err != ESP_OK) return err;
     err = nvs_set_str(nvs, kBridgeUrlKey, bridge_url.c_str());
+    if (err == ESP_OK) err = nvs_set_str(nvs, kDeviceIdKey, device_id.c_str());
     if (err == ESP_OK && !bearer_token.empty())
         err = nvs_set_str(nvs, kBearerTokenKey, bearer_token.c_str());
     if (err == ESP_OK) err = nvs_commit(nvs);
@@ -163,6 +176,7 @@ esp_err_t RuntimeConfig::SaveBridge(const std::string& bridge_url,
     if (err != ESP_OK) return err;
 
     config_.bridge_url = bridge_url;
+    config_.device_id = device_id;
     config_.bearer_token = token;
     if (validation_error) validation_error->clear();
     ESP_LOGI(kTag, "bridge configuration saved");

@@ -1,7 +1,7 @@
 # Coinbase AMOLED Terminal
 
-An unofficial, read-only Coinbase portfolio and market display for the Waveshare
-ESP32-S3 Touch AMOLED 1.8.
+Your Coinbase account, on a tiny screen. Your key stays on your computer. This
+display can't trade.
 
 > [!IMPORTANT]
 > This independent project is **not affiliated with, endorsed by, or sponsored by
@@ -9,54 +9,94 @@ ESP32-S3 Touch AMOLED 1.8.
 > software is not financial advice and must not be used as a substitute for the
 > official Coinbase interfaces.
 
-## Step 1
+> [!WARNING]
+> The two-step installer is implemented, but no production firmware release is
+> published yet. The public one-line install is deliberately disabled until both
+> boards pass real-hardware checks and the release manifests are approved. This
+> pull request is for review, not a ready-to-flash product release.
 
-Run this one line on macOS or mainstream Linux:
+## Step 1 — plug in and run one command
+
+Connect the **Waveshare ESP32-S3 Touch AMOLED 1.8** with a USB data cable. The
+release command installs the local read-only bridge, verifies the matching
+firmware, flashes only approved regions, and places a one-time setup session on
+the display. It runs as you. No `sudo`. No Docker.
+
+For an approved version, the command shape is:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Homard-Simpson/coinbase-amoled-terminal/main/install.sh | bash
+./install.sh --version vX.Y.Z
 ```
 
-## Step 2
+Reviewers can instead supply an explicit test manifest. That path requires the
+loud `--allow-unverified-test-artifacts` flag and is never presented as a
+production install.
 
-At the hidden prompt, paste the Coinbase CDP **ECDSA** API key JSON you downloaded
-from Coinbase, or drag that JSON file into the terminal, then press **Enter**.
-Use a dedicated key with **VIEW PERMISSION ONLY**. **The setup refuses keys that can
-trade or transfer**.
+## Step 2 — join the display Wi-Fi
 
-### What the installer does
+Join the setup Wi-Fi shown on the display. Its captive portal asks for two things:
 
-- Clones application source only from this exact repository's `main` branch into
-  your standard per-user data folder, creates an isolated Python environment, and
-  installs the bridge plus its declared `cryptography` dependency from official
-  PyPI. Docker and administrator access are not used.
-- Stores only the CDP key name and P-256 private PEM in atomic mode-0600 files. It
-  never prints the key or passes it in command arguments, environment variables,
-  or service files.
-- Checks Coinbase's live `/key_permissions` endpoint, creates a separate display
-  ID/token, starts a launchd or systemd user service, and runs `doctor`. If user
-  services are unavailable, it prints a safe foreground command instead.
-- Listens on port 8788 for the authenticated display feed. Use it only on a
-  trusted LAN, or put private HTTPS/tailnet ingress in front as described below.
+1. your home Wi-Fi; and
+2. the Coinbase CDP **ECDSA** API-key JSON you downloaded.
 
-This two-step flow expects the **preflashed hardware package** and its pairing
-screen. If you are building or flashing the source firmware, use
-[Advanced source/developer setup](#advanced-sourcedeveloper-setup) below.
+Press **Finish**. The page securely hands the Coinbase JSON straight to the
+localhost bridge on this same computer. It sends the display only Wi-Fi, a local
+feed address, a device ID, and a revocable read-only token.
 
-Safe sample mode (no Coinbase account or credential):
+If an operating system's small captive window blocks localhost, the portal gives
+you one button to open the same setup on the computer. It is still the same two
+steps. This is a same-computer flow, not phone-only setup.
+
+Unsafe Coinbase keys are rejected. The key must be P-256 ECDSA and strictly
+view-only. A key that can trade or transfer is never saved.
+
+### What happens behind the scenes
+
+- The installer accepts exactly one USB serial device. It never identifies a
+  board from a port name, USB ID, chip model, flash size, or panel probing.
+- An existing official image may identify V1 or V2 only when its exact firmware
+  hash is present in the downloaded release manifest. Otherwise the installer
+  asks once for V1 or V2, with a clear hardware-identification link. No choice is
+  preselected; unattended ambiguity stops safely.
+- Every release artifact and flash region is declared in a versioned manifest and
+  verified with SHA-256 before writing. Unrelated NVS is preserved.
+- The one-time localhost session is short-lived, single-use, and authenticated.
+  It has no analytics, external assets, cookies, browser storage, or secret URLs.
+- The read-only bridge runs as your normal user through launchd or systemd.
+
+V1 and V2 firmware are not interchangeable. V1 performs power-controller setup
+that V2 must never receive. If you have a blank or DIY board, use Waveshare's
+[Version Options guide](https://www.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.8#Version_Options)
+before answering the one V1/V2 question. The installer fails closed rather than
+trying both.
+
+Safe local sample mode (no Coinbase account, credential, or flashing):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Homard-Simpson/coinbase-amoled-terminal/main/install.sh | bash -s -- --sample
+./install.sh --sample
 ```
 
 Uninstall the app and service while keeping private setup data:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Homard-Simpson/coinbase-amoled-terminal/main/install.sh | bash -s -- --uninstall
+./install.sh --uninstall
 ```
 
 Add `--purge` after `--uninstall` only when you also want to delete local
 credentials, configuration, and device tokens.
+
+### Updates, recovery, and reset
+
+- **Update:** rerun Step 1 with a newer approved version. Board and checksum
+  checks run again; saved NVS is preserved.
+- **Setup expired or interrupted:** reconnect USB and rerun the same command. New
+  local state is rolled back unless the display confirms its final save.
+- **Lost display:** revoke that display's token on the bridge. The Coinbase key
+  does not need to be copied to or recovered from the hardware.
+- **Factory reset:** hold BOOT for 10 seconds, join the protected display Wi-Fi,
+  and type `RESET` in the portal. This clears Wi-Fi, device identity/token, and
+  one-time setup metadata while leaving firmware installed. The USB recovery
+  helper erases those same two data partitions only.
 
 ## Actual interface
 
@@ -246,10 +286,12 @@ With ESP-IDF exported in the current shell:
 ./scripts/build-firmware.sh v2
 ```
 
-No secrets are compiled in. The device is onboarded at runtime through its
-captive portal, where you enter Wi-Fi, the bridge feed URL, the device ID, and
-the per-device bearer token; all are stored in NVS. CI builds both variants as
-compile proofs only; do not flash CI artifacts as configured releases.
+No secrets are compiled in. During the installer flow, the captive portal accepts
+home Wi-Fi and sends the Coinbase JSON directly to the authenticated localhost
+endpoint. The ESP receives only Wi-Fi, the bridge feed URL, a UUIDv4 device ID,
+and the per-device bearer token; those device-safe values are stored in NVS. CI
+builds both variants as compile proofs only; do not flash CI artifacts as
+configured releases.
 
 ### 6. Run the complete preflight
 

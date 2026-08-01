@@ -26,6 +26,12 @@ public:
     // An empty token keeps the existing token. First-time setup must provide one.
     esp_err_t SaveBridge(const std::string& bridge_url, const std::string& bearer_token,
                          std::string* validation_error = nullptr);
+    // USB-assisted onboarding replaces the temporary first-boot UUID with the
+    // exact bridge-allowlisted UUID returned by localhost.
+    esp_err_t SaveProvisioning(const std::string& bridge_url,
+                               const std::string& device_id,
+                               const std::string& bearer_token,
+                               std::string* validation_error = nullptr);
 
 private:
     RuntimeConfig() = default;

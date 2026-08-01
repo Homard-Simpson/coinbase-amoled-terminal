@@ -4,6 +4,7 @@ idf_component_register(
         "network_portal.cc"
         "runtime_config.cc"
         "config_validation.cc"
+        "onboarding_metadata.cc"
     INCLUDE_DIRS "."
     REQUIRES
         app_update
@@ -17,4 +18,5 @@ idf_component_register(
         json
         mbedtls
         nvs_flash
+        partition_table
 )

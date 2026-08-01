@@ -27,17 +27,24 @@ public releases begin.
 - A two-step macOS/Linux installer with isolated Python environment, per-user
   launchd/systemd service, idempotent updates, safe uninstall, and offline sample
   mode.
-- A secure one-prompt `quickstart` command for Coinbase CDP JSON or dragged-file
-  input, display credential creation, service startup, and doctor checks.
+- A secure captive-portal flow backed by a short-lived localhost endpoint. The
+  browser sends Coinbase JSON directly to the computer, while a separate ESP
+  request contains only Wi-Fi and revocable device credentials.
+- Real USB flashing and one-time onboarding-partition provisioning with isolated
+  esptool, versioned SHA-256 manifests, exact-hash board detection, and an
+  explicit fail-closed V1/V2 choice for blank or DIY boards.
+- A production release gate: public installation remains disabled until signed
+  artifacts, controls, and both hardware checklists are verified.
 
 ### Security
 
 - Documented a local-bridge credential boundary and no-trading invariant.
 - Added repository preflight checks for common secrets and personal
   infrastructure.
-- Quickstart rejects Legacy, Ed25519, non-P-256, malformed, and oversized keys;
-  enforces the live view-only permission gate before storage; and rolls back new
-  state after failed final validation.
+- Local onboarding rejects Legacy, Ed25519, non-P-256, malformed, and oversized
+  keys; enforces the live view-only permission gate before storage; uses expiring
+  single-use setup/CSRF tokens with strict Origin/CORS/PNA; and rolls back failed
+  provisioning.
 - Installer scripts and service templates are included in shell, lint, test, and
   public-safety CI gates.
 

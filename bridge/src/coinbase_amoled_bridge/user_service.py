@@ -95,6 +95,8 @@ def _start_systemd(environ: Mapping[str, str]) -> ServiceStartResult:
         return ServiceStartResult("failed", "systemd", was_active=was_active)
     if _run([systemctl, "--user", "enable", "--now", SYSTEMD_UNIT]) != 0:
         return ServiceStartResult("failed", "systemd", was_active=was_active)
+    if was_active and _run([systemctl, "--user", "restart", SYSTEMD_UNIT]) != 0:
+        return ServiceStartResult("failed", "systemd", was_active=was_active)
     return ServiceStartResult("started", "systemd", was_active=was_active)
 
 

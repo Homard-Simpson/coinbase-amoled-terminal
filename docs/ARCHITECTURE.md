@@ -64,6 +64,22 @@ The bridge must not expose a generic Coinbase proxy. A route that accepts an
 arbitrary upstream path, method, body, product, or account identifier would break
 the security boundary even if its current caller uses only reads.
 
+### Installer and localhost onboarding
+
+The per-user installer is also the USB flasher and setup-session coordinator. It
+verifies one versioned firmware manifest and each artifact digest, resolves the
+board only from an exact accepted firmware hash or an explicit V1/V2 choice, and
+writes a bounded one-time metadata envelope to a dedicated flash partition. It
+does not erase unrelated NVS.
+
+The onboarding HTTP server binds only to loopback. Captive-portal JavaScript sends
+Coinbase JSON straight to that authenticated endpoint under exact Origin,
+CORS/PNA, method, content-type, size, CSRF, expiry, and single-use controls. After
+the read-only permission gate succeeds, it returns only safe device provisioning
+values. The browser—not the bridge—then sends a separate allowlisted form to the
+ESP. A same-computer localhost page is available when a captive mini-browser
+blocks the direct request.
+
 ### Reverse proxy or private-tailnet ingress
 
 The bridge process binds to loopback by default. Cross-host access should be
@@ -98,7 +114,10 @@ operations.
 | Secret storage ↔ bridge | Owner-readable local storage | Other host users and container layers | File permissions, read-only mount, no image copy |
 | Bridge ↔ ingress | Loopback service | Proxy configuration and host network | Loopback bind, method/path allowlist |
 | Ingress ↔ ESP | Private network endpoints | Network observers and lost devices | HTTPS, scoped token, ACL, rotation |
-| Firmware ↔ display hardware | Selected board variant | Incorrect revision or electrical assumptions | Explicit build selector, clean dual builds |
+| USB flasher ↔ display hardware | Accepted manifest and explicit board identity | Ambiguous or wrong V1/V2 selection | Exact firmware-hash detection or no-default human choice; approved offsets only |
+| Captive browser ↔ localhost onboarding | Short-lived loopback session | Captive portal and other browser origins | Exact Origin/CORS/PNA, bearer + CSRF binding, bounded single-use requests |
+| Localhost onboarding ↔ ESP portal | Browser-held safe provisioning response | Any field that could contain a Coinbase key | Independent allowlisted `/save` form; unknown/duplicate/private-key fields rejected |
+| Firmware ↔ display hardware | Selected board variant | Incorrect revision or electrical assumptions | Explicit build selector, clean dual builds, V2 compile guard against AXP writes |
 | Display ↔ nearby people | Operator | Anyone with visual or physical access | Minimal data, screen-off control, NVS erase |
 
 ## Feed contract
@@ -220,9 +239,12 @@ The firmware source is shared, but hardware-specific code is selected explicitly
 - `v2`: CO5300 display and CST816S/CST820-family touch path, avoiding V1-only PMU
   writes.
 
-CI builds both variants from clean state with placeholder provisioning. Release
-images are built locally with intentionally supplied per-device values and then
-scanned before publication. CI placeholder artifacts are never production images.
+CI builds both variants from clean state without credentials or per-device
+provisioning. Release artifacts are board-specific and accompanied by a manifest
+of offsets, sizes, SHA-256 digests, IDF version, and readiness/attestation flags.
+The installer creates per-device values at runtime and puts only temporary session
+metadata in the onboarding partition. CI artifacts are never production images
+until the manifest controls and both real-hardware checklists are approved.
 
 ## Design decisions
 

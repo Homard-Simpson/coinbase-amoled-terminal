@@ -14,5 +14,8 @@ bool BearerToken(std::string_view value, std::string* reason = nullptr);
 bool WifiCredential(std::string_view ssid, std::string_view password,
                     std::string* reason = nullptr);
 bool DeviceId(std::string_view value);
+// The ESP /save request is an allowlist of safe provisioning fields. Unknown,
+// duplicate, malformed, or private-key-bearing fields fail closed.
+bool SafeProvisioningForm(std::string_view body, std::string* reason = nullptr);
 
 }  // namespace terminal::validation

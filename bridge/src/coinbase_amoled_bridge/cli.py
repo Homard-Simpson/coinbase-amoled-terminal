@@ -275,8 +275,11 @@ class _QuickstartChanges:
 
 def _local_credentials_if_present(store: ConfigStore) -> Credentials | None:
     secrets_dir = store.data_dir / "secrets"
+    bundle_path = secrets_dir / "coinbase_credentials"
     name_path = secrets_dir / "coinbase_api_key_name"
     private_path = secrets_dir / "coinbase_api_private_key"
+    if bundle_path.is_file():
+        return Credentials.load_local(store.data_dir)
     if name_path.is_file() != private_path.is_file():
         raise CredentialError(
             "local Coinbase credential files are incomplete; restore or remove the pair"
@@ -357,7 +360,7 @@ def _lan_feed_url() -> str:
             connection.connect(("192.0.2.1", 9))
             address = str(connection.getsockname()[0])
         parsed = ipaddress.ip_address(address)
-        if parsed.is_loopback or parsed.is_unspecified:
+        if parsed.is_loopback or parsed.is_unspecified or parsed.is_global:
             address = ""
     except (OSError, ValueError):
         address = ""
@@ -385,7 +388,7 @@ def _print_quickstart_result(
         )
         print(f"Background service {reason}; run this command in a terminal:")
         print(_manual_service_command(store, sample=sample))
-    print("\nPair your preflashed display:")
+    print("\nPair your display:")
     print(f"Bridge feed URL: {_lan_feed_url()}")
     print(f"Device ID: {provision.device_id}")
     print(f"Device token file (mode 0600): {provision.token_path}")
@@ -421,7 +424,7 @@ def command_quickstart(args: argparse.Namespace, store: ConfigStore) -> int:
 
         provision = _existing_quickstart_device(store, config)
         if provision is None:
-            provision = DeviceManager(store).add(label="preflashed AMOLED terminal")
+            provision = DeviceManager(store).add(label="AMOLED terminal")
             changes.provision = provision
 
         service = start_user_service()

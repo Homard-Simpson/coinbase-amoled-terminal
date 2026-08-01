@@ -15,7 +15,13 @@ load_idf_552
 BUILD_DIR="$ROOT/build/$VARIANT"
 SDKCONFIG_FILE="$BUILD_DIR/sdkconfig"
 DEFAULTS="$ROOT/sdkconfig.defaults;$ROOT/sdkconfig.$VARIANT.defaults"
-PROJECT_VERSION="1.0.0-$VARIANT"
+RELEASE_VERSION="${FIRMWARE_RELEASE_VERSION:-1.0.0}"
+RELEASE_VERSION="${RELEASE_VERSION#v}"
+[[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || {
+  echo "FIRMWARE_RELEASE_VERSION must be a semantic version" >&2
+  exit 2
+}
+PROJECT_VERSION="$RELEASE_VERSION-$VARIANT"
 mkdir -p "$BUILD_DIR"
 
 echo "Building $VARIANT with ESP-IDF 5.5.2 -> $BUILD_DIR"

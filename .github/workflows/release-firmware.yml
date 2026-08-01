@@ -1,0 +1,55 @@
+name: Build versioned firmware release bundle
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version label such as v1.1.0-rc1
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-firmware-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bundle:
+    name: Build V1 and V2 bundle (not published)
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      FIRMWARE_RELEASE_VERSION: ${{ inputs.version }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build both revisions with ESP-IDF 5.5.2
+        uses: espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5 # v1.2.0
+        with:
+          esp_idf_version: v5.5.2
+          target: esp32s3
+          path: .
+          command: |
+            ./scripts/build-firmware.sh v1 --ci-placeholder
+            ./scripts/build-firmware.sh v2 --ci-placeholder
+            python3 scripts/generate-release-manifest.py \
+              --build-root firmware/build \
+              --output dist/firmware \
+              --version "$FIRMWARE_RELEASE_VERSION"
+
+      - name: Upload checksum manifest and binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: firmware-release-bundle-${{ inputs.version }}-NOT-PUBLISHED
+          path: dist/firmware/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: State publication boundary
+        run: |
+          echo "This workflow does not create or publish a GitHub release."
+          echo "Manifest readiness, controls, and hardware-attestation flags remain false."

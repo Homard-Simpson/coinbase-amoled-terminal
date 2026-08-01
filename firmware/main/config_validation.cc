@@ -4,6 +4,7 @@
 #include <array>
 #include <cctype>
 #include <cstdint>
+#include <set>
 
 namespace terminal::validation {
 namespace {
@@ -106,6 +107,33 @@ bool ValidHostname(std::string_view host) {
         ++label_size;
     }
     return true;
+}
+
+int HexValue(char character) {
+    if (character >= '0' && character <= '9') return character - '0';
+    if (character >= 'a' && character <= 'f') return character - 'a' + 10;
+    if (character >= 'A' && character <= 'F') return character - 'A' + 10;
+    return -1;
+}
+
+bool StrictUrlDecode(std::string_view input, std::string* output) {
+    output->clear();
+    output->reserve(input.size());
+    for (size_t index = 0; index < input.size(); ++index) {
+        if (input[index] == '+') {
+            output->push_back(' ');
+        } else if (input[index] == '%') {
+            if (index + 2 >= input.size()) return false;
+            const int high = HexValue(input[index + 1]);
+            const int low = HexValue(input[index + 2]);
+            if (high < 0 || low < 0) return false;
+            output->push_back(static_cast<char>((high << 4) | low));
+            index += 2;
+        } else {
+            output->push_back(input[index]);
+        }
+    }
+    return output->find('\0') == std::string::npos;
 }
 
 }  // namespace
@@ -228,6 +256,43 @@ bool DeviceId(std::string_view value) {
     }
     return value[14] == '4' && (value[19] == '8' || value[19] == '9' ||
                                 value[19] == 'a' || value[19] == 'b');
+}
+
+bool SafeProvisioningForm(std::string_view body, std::string* reason) {
+    if (body.empty() || body.size() > 4096)
+        return Fail(reason, "Provisioning request size is invalid");
+    static const std::set<std::string> allowed = {
+        "csrf", "setup_csrf", "ssid", "password", "bridge_url", "device_id",
+        "bridge_token"};
+    std::set<std::string> seen;
+    std::string decoded_body;
+    if (!StrictUrlDecode(body, &decoded_body))
+        return Fail(reason, "Provisioning request encoding is invalid");
+    const std::string lower_body = Lower(decoded_body);
+    if (lower_body.find("private key-----") != std::string::npos)
+        return Fail(reason, "Provisioning request contains a forbidden value");
+
+    size_t start = 0;
+    while (start <= body.size()) {
+        const size_t end = body.find('&', start);
+        const std::string_view field = body.substr(
+            start, end == std::string_view::npos ? body.size() - start : end - start);
+        const size_t equals = field.find('=');
+        if (field.empty() || equals == std::string_view::npos)
+            return Fail(reason, "Provisioning request fields are invalid");
+        std::string key;
+        if (!StrictUrlDecode(field.substr(0, equals), &key) || !allowed.count(key) ||
+            !seen.insert(key).second)
+            return Fail(reason, "Provisioning request fields are invalid");
+        if (end == std::string_view::npos) break;
+        start = end + 1;
+    }
+    if (!seen.count("ssid") || !seen.count("password") ||
+        !seen.count("bridge_url") || !seen.count("device_id") ||
+        !seen.count("bridge_token"))
+        return Fail(reason, "Provisioning request is incomplete");
+    if (reason) reason->clear();
+    return true;
 }
 
 }  // namespace terminal::validation

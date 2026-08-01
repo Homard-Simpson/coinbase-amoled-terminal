@@ -91,28 +91,36 @@ python -m pip install --upgrade pip
 python -m pip install -e .
 ```
 
-## Secure one-prompt quickstart
+## Secure local onboarding
 
-The root `install.sh` invokes this automatically after installing its per-user
-launchd/systemd service:
+The root installer imports the bridge's onboarding coordinator, creates a
+short-lived localhost-only HTTP server, and writes only that session's opaque
+metadata to the ESP over USB. The user then joins the display setup AP and enters
+home Wi-Fi plus Coinbase's downloaded `name`/`privateKey` JSON in the captive
+portal.
 
-```sh
-coinbase-amoled-bridge --data-dir ./data quickstart
-```
+Portal JavaScript sends the Coinbase JSON directly to the authenticated localhost
+endpoint. The ESP never receives or reads it. The bridge validates unencrypted
+P-256/ES256, refuses Legacy/Ed25519/RSA/oversized input, enforces
+`/key_permissions`, and makes one bounded read-only product GET before atomically
+writing the owner-only credential bundle.
 
-At one hidden prompt, paste the downloaded Coinbase CDP ECDSA JSON or drag the
-JSON file into the terminal. The parser accepts Coinbase's `name` and
-`privateKey` fields, validates an unencrypted P-256/ES256 PEM, and rejects Legacy,
-Ed25519, RSA, malformed, and oversized inputs. It checks `/key_permissions`
-before saving, stores only the key name and private PEM in atomic mode-0600 files,
-creates/reuses one display credential, starts the installed user service, and
-runs `doctor`. Newly created state is rolled back if final validation fails.
-Credential and device-token values are never printed.
+The bridge then creates the display's UUIDv4 and revocable token. It returns only
+feed URL, device ID, and token to the browser, which builds a separate allowlisted
+ESP `/save` request containing those safe values plus Wi-Fi. A failed validation
+writes nothing; a later coordinator/service failure restores the prior credential,
+configuration, token-file, and service state.
 
-The installer configures the authenticated feed on trusted-LAN port `8788` for a
-preflashed package pairing screen. Use private HTTPS/tailnet ingress on any
-untrusted network. Source-built firmware generates its own device ID; register it
-with the advanced `device add --device-id` command.
+Session, authorization, and CSRF values are independent, random, expiring, and
+single-use. Strict loopback Host, exact portal/localhost Origin, CORS/PNA, body,
+method, content-type, and request-header checks protect the endpoint. Pages use no
+external assets, cookies, analytics, redirects, browser storage, credential URLs,
+or autocomplete. A same-computer fallback page covers captive mini-browsers that
+block localhost. See [secure onboarding](../docs/SECURE_ONBOARDING.md).
+
+The older terminal `quickstart` remains available as an advanced local recovery
+path, but the consumer installer does not ask users to paste credentials into a
+terminal.
 
 ## Offline/sample quick start
 

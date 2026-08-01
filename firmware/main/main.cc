@@ -47,6 +47,7 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "network_portal.h"
+#include "onboarding_metadata.h"
 #include "runtime_config.h"
 
 #define PROGMEM
@@ -717,6 +718,9 @@ extern "C" void app_main(){
   }
   ESP_ERROR_CHECK(err);
   ESP_ERROR_CHECK(RuntimeConfig::GetInstance().Initialize());
+  err=OnboardingMetadata::GetInstance().Initialize();
+  if(err!=ESP_OK&&err!=ESP_ERR_NOT_FOUND)
+    ESP_LOGW(TAG,"unable to read USB onboarding metadata: %s",esp_err_to_name(err));
   init_rest();
   state_mux=xSemaphoreCreateMutex();if(!state_mux)abort();
 

@@ -5,12 +5,21 @@ umask 077
 
 readonly REPOSITORY_URL="https://github.com/Homard-Simpson/coinbase-amoled-terminal.git"
 readonly REPOSITORY_BRANCH="main"
+readonly DEFAULT_FIRMWARE_VERSION=""
 readonly LAUNCHD_LABEL="com.homardsimpson.coinbase-amoled-bridge"
 readonly SYSTEMD_UNIT="coinbase-amoled-bridge.service"
 
 SAMPLE=0
 UNINSTALL=0
 PURGE=0
+ALLOW_TEST_ARTIFACTS=0
+NO_OPEN=0
+NON_INTERACTIVE=0
+FIRMWARE_VERSION="$DEFAULT_FIRMWARE_VERSION"
+MANIFEST_URL=""
+BOARD=""
+SERIAL_PORT=""
+BRIDGE_URL=""
 CLONE_TEMP=""
 
 usage() {
@@ -18,17 +27,29 @@ usage() {
 Coinbase AMOLED Terminal per-user installer
 
 Usage:
-  install.sh             Install/update and open the secure key prompt
-  install.sh --sample    Install/update with offline sample data
-  install.sh --uninstall Remove the app and user service; keep credentials
-  install.sh --uninstall --purge
-                         Also remove local credentials and device tokens
+  install.sh --version v1.2.3
+                         Install bridge, verify release, flash, and open setup
+  install.sh --manifest-url URL --allow-unverified-test-artifacts
+                         Explicit review/testing path; not a production release
+  install.sh --sample    Install an offline sample bridge without flashing
+  install.sh --uninstall [--purge]
+
+Optional flashing arguments:
+  --board v1|v2          Required only when trusted firmware cannot identify it
+  --port /dev/...        Use this USB serial port instead of exact-one detection
+  --bridge-url URL       Override the detected private-LAN device-feed URL
+  --no-open              Compatibility flag; captive portal now owns fallback
+  --non-interactive      Fail rather than prompting when board identity is unclear
 EOF
 }
 
 die() {
-  printf 'install error: %s\n' "$1" >&2
+  printf 'Setup stopped: %s\n' "$1" >&2
   exit 1
+}
+
+need_value() {
+  [[ $# -ge 2 && -n "$2" ]] || die "$1 needs a value"
 }
 
 cleanup_clone() {
@@ -44,27 +65,54 @@ git_exact() {
     -c protocol.file.allow=never "$@"
 }
 
-for argument in "$@"; do
-  case "$argument" in
-    --sample) SAMPLE=1 ;;
-    --uninstall) UNINSTALL=1 ;;
-    --purge) PURGE=1 ;;
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --sample) SAMPLE=1; shift ;;
+    --uninstall) UNINSTALL=1; shift ;;
+    --purge) PURGE=1; shift ;;
+    --allow-unverified-test-artifacts) ALLOW_TEST_ARTIFACTS=1; shift ;;
+    --no-open) NO_OPEN=1; shift ;;
+    --non-interactive) NON_INTERACTIVE=1; shift ;;
+    --version)
+      need_value "$@"; FIRMWARE_VERSION="$2"; shift 2 ;;
+    --manifest-url)
+      need_value "$@"; MANIFEST_URL="$2"; shift 2 ;;
+    --board)
+      need_value "$@"; BOARD="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"; shift 2 ;;
+    --port)
+      need_value "$@"; SERIAL_PORT="$2"; shift 2 ;;
+    --bridge-url)
+      need_value "$@"; BRIDGE_URL="$2"; shift 2 ;;
     --help|-h)
       usage
       exit 0
       ;;
     *)
       usage >&2
-      die "unknown option: $argument"
+      die "unknown option: $1"
       ;;
   esac
 done
 
+[[ "$BOARD" == "" || "$BOARD" == "v1" || "$BOARD" == "v2" ]] || \
+  die "--board must be v1 or v2"
 if [[ "$PURGE" == "1" && "$UNINSTALL" != "1" ]]; then
   die "--purge is valid only with --uninstall"
 fi
 if [[ "$SAMPLE" == "1" && "$UNINSTALL" == "1" ]]; then
   die "--sample and --uninstall cannot be combined"
+fi
+if [[ -n "$FIRMWARE_VERSION" && -n "$MANIFEST_URL" ]]; then
+  die "use either --version or --manifest-url, not both"
+fi
+if [[ "$ALLOW_TEST_ARTIFACTS" == "1" && -z "$MANIFEST_URL" ]]; then
+  die "test-artifact mode requires an explicit --manifest-url"
+fi
+if [[ "$SAMPLE" == "1" && ( -n "$FIRMWARE_VERSION" || -n "$MANIFEST_URL" || -n "$BOARD" || -n "$SERIAL_PORT" ) ]]; then
+  die "sample mode does not flash firmware"
+fi
+if [[ "$SAMPLE" != "1" && "$UNINSTALL" != "1" && -z "$FIRMWARE_VERSION" && -z "$MANIFEST_URL" ]]; then
+  die "production firmware assets are not published yet; this draft cannot run the public one-liner"
 fi
 if [[ "${EUID:-$(id -u)}" == "0" ]]; then
   die "run this installer as your normal user, never with sudo"
@@ -72,8 +120,8 @@ fi
 if [[ -z "${HOME:-}" || "$HOME" != /* || "$HOME" == "/" ]]; then
   die "HOME must be a safe absolute user directory"
 fi
-case "$HOME" in
-  *$'\n'*|*$'\r'*|*$'\t'*) die "HOME contains a control character" ;;
+case "$HOME$FIRMWARE_VERSION$MANIFEST_URL$BOARD$SERIAL_PORT$BRIDGE_URL" in
+  *$'\n'*|*$'\r'*|*$'\t'*) die "an installer argument contains a control character" ;;
 esac
 
 case "$(uname -s)" in
@@ -96,9 +144,7 @@ case "$(uname -s)" in
     STATE_DIR="$CONFIG_HOME/coinbase-amoled-bridge"
     SERVICE_FILE="$CONFIG_HOME/systemd/user/$SYSTEMD_UNIT"
     ;;
-  *)
-    die "supported systems are macOS and mainstream Linux"
-    ;;
+  *) die "supported systems are macOS and mainstream Linux" ;;
 esac
 
 SOURCE_DIR="$INSTALL_ROOT/source"
@@ -121,16 +167,11 @@ uninstall_app() {
   elif command -v systemctl >/dev/null 2>&1; then
     systemctl --user disable --now "$SYSTEMD_UNIT" >/dev/null 2>&1 || true
   fi
-
   rm -f -- "$SERVICE_FILE"
-  if [[ -L "$USER_BIN" ]]; then
-    linked_target="$(readlink "$USER_BIN" 2>/dev/null || true)"
-    if [[ "$linked_target" == "$APP_BIN" ]]; then
-      rm -f -- "$USER_BIN"
-    fi
+  if [[ -L "$USER_BIN" && "$(readlink "$USER_BIN" 2>/dev/null || true)" == "$APP_BIN" ]]; then
+    rm -f -- "$USER_BIN"
   fi
   rm -rf -- "$INSTALL_ROOT"
-
   if [[ "$PLATFORM" == "linux" ]] && command -v systemctl >/dev/null 2>&1; then
     systemctl --user daemon-reload >/dev/null 2>&1 || true
   fi
@@ -140,7 +181,7 @@ uninstall_app() {
     printf 'Removed local credentials, configuration, and device tokens.\n'
   else
     printf 'Kept private configuration and credentials at:\n  %s\n' "$STATE_DIR"
-    printf 'To remove them too, rerun the installer with --uninstall --purge.\n'
+    printf 'Add --purge only when you also want to remove those private files.\n'
   fi
 }
 
@@ -149,30 +190,23 @@ if [[ "$UNINSTALL" == "1" ]]; then
   exit 0
 fi
 
-command -v git >/dev/null 2>&1 || die \
-  "Git is required. Install Git with your operating system's supported package manager."
-
+command -v git >/dev/null 2>&1 || die "Git is missing. Install Git, then run the same line again."
 PYTHON_BIN=""
 for candidate in python3 python3.14 python3.13 python3.12 python3.11; do
   if command -v "$candidate" >/dev/null 2>&1 && \
-    "$candidate" -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' \
-      >/dev/null 2>&1; then
+    "$candidate" -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' >/dev/null 2>&1; then
     PYTHON_BIN="$(command -v "$candidate")"
     break
   fi
 done
-if [[ -z "$PYTHON_BIN" ]]; then
-  die "Python 3.11 or newer is required. Install Python with venv support, then rerun."
-fi
+[[ -n "$PYTHON_BIN" ]] || die "Python 3.11 or newer is missing. Install Python, then run the same line again."
 
 mkdir -p -- "$INSTALL_ROOT"
 chmod 700 "$INSTALL_ROOT" 2>/dev/null || true
-
 if [[ ! -e "$SOURCE_DIR" ]]; then
   CLONE_TEMP="$INSTALL_ROOT/.source-clone-$$"
-  if ! git_exact clone --branch "$REPOSITORY_BRANCH" --single-branch \
-    "$REPOSITORY_URL" "$CLONE_TEMP"; then
-    die "GitHub download failed; check the HTTP/network error above and retry"
+  if ! git_exact clone --branch "$REPOSITORY_BRANCH" --single-branch "$REPOSITORY_URL" "$CLONE_TEMP"; then
+    die "I couldn't download the app. Check your internet connection, then try again."
   fi
   mv -- "$CLONE_TEMP" "$SOURCE_DIR"
   CLONE_TEMP=""
@@ -180,43 +214,42 @@ elif [[ ! -d "$SOURCE_DIR/.git" ]]; then
   die "install source exists but is not the expected Git checkout: $SOURCE_DIR"
 else
   origin_url="$(git_exact -C "$SOURCE_DIR" config --get remote.origin.url || true)"
-  [[ "$origin_url" == "$REPOSITORY_URL" ]] || \
-    die "existing install source is not the exact approved GitHub repository"
+  [[ "$origin_url" == "$REPOSITORY_URL" ]] || die "existing source is not the approved repository"
   branch="$(git_exact -C "$SOURCE_DIR" symbolic-ref --quiet --short HEAD || true)"
-  [[ "$branch" == "$REPOSITORY_BRANCH" ]] || \
-    die "existing install source is not on the approved main branch"
+  [[ "$branch" == "$REPOSITORY_BRANCH" ]] || die "existing source is not on the approved main branch"
   [[ -z "$(git_exact -C "$SOURCE_DIR" status --porcelain --untracked-files=normal)" ]] || \
-    die "existing install source has local changes; preserve or remove them before updating"
-  if ! git_exact -C "$SOURCE_DIR" fetch --prune origin "$REPOSITORY_BRANCH"; then
-    die "GitHub update failed; check the HTTP/network error above and retry"
-  fi
+    die "existing source has local changes; preserve or remove them before updating"
+  git_exact -C "$SOURCE_DIR" fetch --prune origin "$REPOSITORY_BRANCH" || \
+    die "I couldn't update the app. Check your internet connection, then try again."
   local_revision="$(git_exact -C "$SOURCE_DIR" rev-parse HEAD)"
   remote_revision="$(git_exact -C "$SOURCE_DIR" rev-parse "origin/$REPOSITORY_BRANCH")"
   if [[ "$local_revision" != "$remote_revision" ]]; then
-    if ! git_exact -C "$SOURCE_DIR" merge-base --is-ancestor \
-      "$local_revision" "$remote_revision"; then
-      die "installed source diverged from the approved main branch; refusing to overwrite it"
-    fi
+    git_exact -C "$SOURCE_DIR" merge-base --is-ancestor "$local_revision" "$remote_revision" || \
+      die "installed source diverged from main; refusing to overwrite it"
     git_exact -C "$SOURCE_DIR" merge --ff-only "origin/$REPOSITORY_BRANCH"
   fi
 fi
 
-if ! "$PYTHON_BIN" -m venv "$VENV_DIR"; then
-  die "Python venv creation failed; install your distribution's Python venv package and retry"
+"$PYTHON_BIN" -m venv "$VENV_DIR" || \
+  die "Python could not create its private environment. Install venv support, then try again."
+pip_arguments=(
+  --index-url https://pypi.org/simple
+  --disable-pip-version-check
+  --no-input
+  --upgrade
+  "$SOURCE_DIR/bridge"
+)
+if [[ "$SAMPLE" != "1" ]]; then
+  pip_arguments+=("esptool>=4.8,<5")
 fi
-if ! "$VENV_DIR/bin/python" -m pip --isolated install \
-  --index-url https://pypi.org/simple --disable-pip-version-check --no-input --upgrade \
-  "$SOURCE_DIR/bridge"; then
-  die "bridge package installation failed; review the pip/network error above and retry"
-fi
+"$VENV_DIR/bin/python" -m pip --isolated install "${pip_arguments[@]}" || \
+  die "I couldn't install the bridge and isolated flashing tools."
 
 mkdir -p -- "$INSTALL_ROOT/bin" "$HOME/.local/bin" "$(dirname "$SERVICE_FILE")"
 ln -sfn -- "$VENV_DIR/bin/coinbase-amoled-bridge" "$APP_BIN"
 if [[ ! -e "$USER_BIN" && ! -L "$USER_BIN" ]]; then
   ln -s -- "$APP_BIN" "$USER_BIN"
-elif [[ -L "$USER_BIN" && "$(readlink "$USER_BIN" 2>/dev/null || true)" == "$APP_BIN" ]]; then
-  :
-else
+elif [[ ! -L "$USER_BIN" || "$(readlink "$USER_BIN" 2>/dev/null || true)" != "$APP_BIN" ]]; then
   printf 'warning: left existing command untouched: %s\n' "$USER_BIN" >&2
 fi
 
@@ -225,9 +258,7 @@ render_arguments=(
   --executable "$VENV_DIR/bin/coinbase-amoled-bridge"
   --data-dir "$STATE_DIR"
 )
-if [[ "$SAMPLE" == "1" ]]; then
-  render_arguments+=(--sample)
-fi
+[[ "$SAMPLE" == "1" ]] && render_arguments+=(--sample)
 if [[ "$PLATFORM" == "macos" ]]; then
   "$VENV_DIR/bin/python" "$SOURCE_DIR/installer/render_service.py" \
     --platform launchd \
@@ -240,21 +271,25 @@ else
     "${render_arguments[@]}"
 fi
 
-printf '\nInstalled the read-only bridge from %s (%s).\n' \
-  "$REPOSITORY_URL" "$REPOSITORY_BRANCH"
-printf 'No Docker or administrator access was used.\n\n'
-
-quickstart_arguments=(--data-dir "$STATE_DIR" quickstart)
 if [[ "$SAMPLE" == "1" ]]; then
-  quickstart_arguments+=(--sample)
+  "$APP_BIN" --data-dir "$STATE_DIR" quickstart --sample || \
+    die "sample bridge setup did not finish"
+  printf 'Sample bridge installed. No Coinbase account was contacted.\n'
+  exit 0
 fi
-if ! "$APP_BIN" "${quickstart_arguments[@]}"; then
-  printf '\nQuickstart did not complete. Nothing was sent through this installer.\n' >&2
-  printf 'Rerun it in a terminal with:\n  %q --data-dir %q quickstart' \
-    "$APP_BIN" "$STATE_DIR" >&2
-  if [[ "$SAMPLE" == "1" ]]; then
-    printf ' --sample' >&2
-  fi
-  printf '\n' >&2
-  exit 1
+
+onboard_arguments=(--data-dir "$STATE_DIR")
+if [[ -n "$FIRMWARE_VERSION" ]]; then
+  onboard_arguments+=(--version "$FIRMWARE_VERSION")
+else
+  onboard_arguments+=(--manifest-url "$MANIFEST_URL")
 fi
+[[ -n "$BOARD" ]] && onboard_arguments+=(--board "$BOARD")
+[[ -n "$SERIAL_PORT" ]] && onboard_arguments+=(--port "$SERIAL_PORT")
+[[ -n "$BRIDGE_URL" ]] && onboard_arguments+=(--bridge-url "$BRIDGE_URL")
+[[ "$ALLOW_TEST_ARTIFACTS" == "1" ]] && onboard_arguments+=(--allow-unverified-test-artifacts)
+[[ "$NO_OPEN" == "1" ]] && onboard_arguments+=(--no-open)
+[[ "$NON_INTERACTIVE" == "1" ]] && onboard_arguments+=(--non-interactive)
+
+"$VENV_DIR/bin/python" "$SOURCE_DIR/installer/onboard_device.py" "${onboard_arguments[@]}" || \
+  die "setup stopped safely; rerun the same command to create a new one-time session"

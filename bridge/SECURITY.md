@@ -10,8 +10,11 @@
   `can_view=true`, `can_trade=false`, and `can_transfer=false`.
 - The HTTP service exposes only `GET`/`HEAD` health routes and the authenticated
   device feed. There is no HTTP admin route.
-- Raw Coinbase credentials never enter `config.json`. Device bearer tokens are
-  stored there only as SHA-256 digests.
+- Raw Coinbase credentials never enter `config.json` or an ESP request. Device
+  bearer tokens are stored in config only as SHA-256 digests.
+- Consumer onboarding binds only to loopback, uses expiring one-time setup/CSRF
+  values and strict Origin/CORS/PNA checks, and persists nothing until the live
+  view-only permission gate passes.
 
 These are defense-in-depth controls, not permission to use a broadly privileged
 Coinbase key. Create a dedicated ECDSA key with **view only**, portfolio and IP
@@ -21,7 +24,7 @@ restrictions, and no trade or transfer capability.
 
 1. Keep the bridge and its data directory patched and access-controlled.
 2. Use HTTPS end to end outside a network you control. The default host bind is
-   loopback. The preflashed-package user service explicitly enables authenticated
+   loopback. The two-step installer user service explicitly enables authenticated
    plain HTTP for same-trusted-LAN pairing; never use it on a guest/public LAN or
    publish it through router forwarding. Other non-loopback binds belong behind a
    trusted TLS reverse proxy or inside a private container network.

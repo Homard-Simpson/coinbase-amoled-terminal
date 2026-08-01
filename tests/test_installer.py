@@ -142,6 +142,10 @@ set -euo pipefail
 if [[ "${1:-}" == "-m" && "${2:-}" == "pip" ]]; then
   exit 0
 fi
+if [[ "${1:-}" == */installer/onboard_device.py ]]; then
+  printf 'onboard %s\n' "$*" >> "$INSTALL_TEST_LOG"
+  exit 0
+fi
 exec "$REAL_PYTHON" "$@"
 PYTHON_WRAPPER
   cat > "$target/bin/coinbase-amoled-bridge" <<'CLI_WRAPPER'
@@ -188,20 +192,29 @@ exit 91
         self.assertNotRegex(script, r"(?m)^\s*sudo\b")
         self.assertNotIn("curl ", script)
         self.assertNotIn("COINBASE_API_PRIVATE_KEY=", script)
-        self.assertIn("quickstart_arguments=(--data-dir", script)
-        self.assertIn("GitHub download failed", script)
+        self.assertIn('readonly DEFAULT_FIRMWARE_VERSION=""', script)
+        self.assertIn('"esptool>=4.8,<5"', script)
+        self.assertIn('"$SOURCE_DIR/installer/onboard_device.py"', script)
+        self.assertIn("production firmware assets are not published yet", script)
         self.assertIn("-m pip --isolated install", script)
         self.assertIn("--index-url https://pypi.org/simple", script)
 
-    def test_readme_frontloads_exact_two_step_command_before_screenshots(self) -> None:
+    def test_readme_frontloads_two_steps_but_blocks_public_release(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        command = (
+        public_command = (
             "curl -fsSL https://raw.githubusercontent.com/Homard-Simpson/"
             "coinbase-amoled-terminal/main/install.sh | bash"
         )
-        self.assertEqual(readme.count("## Step 1\n"), 1)
-        self.assertEqual(readme.count("## Step 2\n"), 1)
-        self.assertIn(command, readme)
+        self.assertIn(
+            "Your Coinbase account, on a tiny screen. Your key stays on your computer. "
+            "This\ndisplay can't trade.",
+            readme,
+        )
+        self.assertEqual(readme.count("## Step 1 —"), 1)
+        self.assertEqual(readme.count("## Step 2 —"), 1)
+        self.assertIn("./install.sh --version vX.Y.Z", readme)
+        self.assertIn("public one-line install is deliberately disabled", readme)
+        self.assertNotIn(public_command, readme)
         self.assertLess(readme.index("## Step 1"), readme.index("## Step 2"))
         self.assertLess(readme.index("## Step 2"), readme.index("## Actual interface"))
 
@@ -219,7 +232,7 @@ exit 91
                     timeout=30,
                 )
                 self.assertEqual(completed.returncode, 0, completed.stderr)
-                self.assertIn("No Docker or administrator access was used", completed.stdout)
+                self.assertIn("Sample bridge installed", completed.stdout)
 
             install_root = temporary / "data home" / "coinbase-amoled-terminal"
             state_dir = temporary / "config home" / "coinbase-amoled-bridge"
@@ -285,6 +298,60 @@ exit 91
             self.assertNotIn("@SAMPLE_ARG", plist_text)
             self.assertIn("quickstart --sample", invocation_log.read_text())
 
+    def test_real_path_installs_service_and_invokes_flash_onboarding(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_name:
+            temporary = Path(temporary_name)
+            environment, _, invocation_log = self._fake_environment(temporary)
+            manifest = temporary / "firmware-manifest.json"
+            manifest.write_text("{}", encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    "/bin/bash",
+                    str(INSTALLER),
+                    "--manifest-url",
+                    manifest.as_uri(),
+                    "--allow-unverified-test-artifacts",
+                    "--board",
+                    "v2",
+                    "--port",
+                    "/dev/cu.usbmodem-test",
+                    "--bridge-url",
+                    "http://100.100.20.10:8788/v1/device-feed",
+                    "--no-open",
+                    "--non-interactive",
+                ],
+                check=False,
+                text=True,
+                capture_output=True,
+                env=environment,
+                timeout=30,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            unit = temporary / "config home" / "systemd" / "user" / "coinbase-amoled-bridge.service"
+            self.assertTrue(unit.is_file())
+            self.assertNotIn("--sample", unit.read_text(encoding="utf-8"))
+            invocation = invocation_log.read_text(encoding="utf-8")
+            self.assertIn("onboard ", invocation)
+            self.assertIn("--board v2", invocation)
+            self.assertIn("--allow-unverified-test-artifacts", invocation)
+            self.assertIn("--non-interactive", invocation)
+
+    def test_public_default_fails_before_install_until_release_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_name:
+            temporary = Path(temporary_name)
+            environment, _, _ = self._fake_environment(temporary)
+            completed = subprocess.run(
+                ["/bin/bash", str(INSTALLER)],
+                check=False,
+                text=True,
+                capture_output=True,
+                env=environment,
+                timeout=30,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("production firmware assets are not published", completed.stderr)
+            self.assertFalse((temporary / "data home").exists())
+
     def test_clone_http_failure_is_clear_and_does_not_install_source(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_name:
             temporary = Path(temporary_name)
@@ -303,7 +370,7 @@ exit 91
                 timeout=30,
             )
             self.assertNotEqual(completed.returncode, 0)
-            self.assertIn("GitHub download failed", completed.stderr)
+            self.assertIn("couldn't download the app", completed.stderr)
             source = temporary / "data home" / "coinbase-amoled-terminal" / "source"
             self.assertFalse(source.exists())
 

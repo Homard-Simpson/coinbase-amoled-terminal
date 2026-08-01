@@ -23,6 +23,14 @@ class ReadOnlyViolation(BridgeError):
     """A request fell outside the hard-coded GET allowlist."""
 
 
+class SetupSessionError(BridgeError):
+    """A local one-time setup session is invalid, expired, or already used."""
+
+
+class ProvisioningError(BridgeError):
+    """The local display-provisioning step failed without exposing input."""
+
+
 class CoinbaseAPIError(BridgeError):
     """Sanitized upstream error.
 
