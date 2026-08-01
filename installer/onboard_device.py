@@ -111,6 +111,7 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--version")
     source.add_argument("--manifest-url")
     parser.add_argument("--data-dir", required=True)
+    parser.add_argument("--manifest-sha256")
     parser.add_argument("--port")
     parser.add_argument("--board", choices=("v1", "v2"))
     parser.add_argument("--bridge-url")
@@ -126,24 +127,23 @@ def main() -> int:
     manifest_url = args.manifest_url if args.manifest_url else official_manifest_url(args.version)
     manifest = load_manifest(
         manifest_url,
+        expected_release_version=args.version,
+        expected_manifest_sha256=args.manifest_sha256,
         allow_test_url=args.allow_unverified_test_artifacts,
     )
-    port = args.port or detect_serial_port()
-    runner = EsptoolRunner(python=sys.executable, port=port)
-
-    print("Checking the connected display without probing its panel hardware…")
     board = select_board(
         manifest,
-        runner.read_flash,
         requested=args.board,
         interactive=not args.non_interactive,
     )
+    port = args.port or detect_serial_port()
+    runner = EsptoolRunner(python=sys.executable, port=port)
     require_release_readiness(
         manifest,
         board=board,
         allow_unverified_test_artifacts=args.allow_unverified_test_artifacts,
     )
-    print(f"Using the verified {board.upper()} firmware path.")
+    print(f"Using the explicit {board.upper()} physical-board selection.")
 
     bridge_url = _validate_bridge_url(
         args.bridge_url or f"http://{_private_lan_address()}:{DEFAULT_FEED_PORT}/v1/device-feed"

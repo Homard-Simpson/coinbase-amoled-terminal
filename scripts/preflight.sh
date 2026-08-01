@@ -106,6 +106,16 @@ if [[ "${PREFLIGHT_FIRMWARE:-0}" == "1" ]]; then
   ./scripts/build-firmware.sh v1 --ci-placeholder
   note "ESP-IDF V2 placeholder build"
   ./scripts/build-firmware.sh v2 --ci-placeholder
+  note "Firmware binary secret scan"
+  "$PYTHON" scripts/scan-release-artifacts.py \
+    firmware/build/v1/bootloader/bootloader.bin \
+    firmware/build/v1/partition_table/partition-table.bin \
+    firmware/build/v1/ota_data_initial.bin \
+    firmware/build/v1/coinbase_amoled_terminal.bin \
+    firmware/build/v2/bootloader/bootloader.bin \
+    firmware/build/v2/partition_table/partition-table.bin \
+    firmware/build/v2/ota_data_initial.bin \
+    firmware/build/v2/coinbase_amoled_terminal.bin
 fi
 
 printf '\nPreflight passed.\n'

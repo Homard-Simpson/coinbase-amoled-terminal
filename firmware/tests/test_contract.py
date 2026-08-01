@@ -85,7 +85,14 @@ class ContractTests(unittest.TestCase):
         self.assertIn("#if BOARD_IS_V1", main)
         v1_start = main.index("static const uint8_t axp_seq")
         v2_boundary = main.index("#else", v1_start)
-        self.assertIn("i2c_master_transmit", main[v1_start:v2_boundary])
+        v1_block = main[v1_start:v2_boundary]
+        self.assertIn("i2c_master_transmit", v1_block)
+        rail_registers = [
+            int(value, 16)
+            for value in re.findall(r"\{0x([89][0-9A-Fa-f]),", v1_block)
+        ]
+        self.assertEqual(rail_registers, [0x80, 0x90, 0x91, 0x82, 0x92, 0x90])
+        self.assertEqual(main.count("i2c_master_transmit(axp,"), 1)
         self.assertNotIn("i2c_master_transmit", main[v2_boundary:main.index("#endif", v2_boundary)])
 
     def test_no_private_literals_or_publishable_artifacts(self):

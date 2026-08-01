@@ -17,6 +17,7 @@ NO_OPEN=0
 NON_INTERACTIVE=0
 FIRMWARE_VERSION="$DEFAULT_FIRMWARE_VERSION"
 MANIFEST_URL=""
+MANIFEST_SHA256=""
 BOARD=""
 SERIAL_PORT=""
 BRIDGE_URL=""
@@ -27,15 +28,15 @@ usage() {
 Coinbase AMOLED Terminal per-user installer
 
 Usage:
-  install.sh --version v1.2.3
-                         Install bridge, verify release, flash, and open setup
+  install.sh --version v1.2.3 --manifest-sha256 SHA256
+                         Install an exact verified release, flash, and open setup
   install.sh --manifest-url URL --allow-unverified-test-artifacts
                          Explicit review/testing path; not a production release
   install.sh --sample    Install an offline sample bridge without flashing
   install.sh --uninstall [--purge]
 
 Optional flashing arguments:
-  --board v1|v2          Required only when trusted firmware cannot identify it
+  --board v1|v2          Select the physical revision; prompted if omitted
   --port /dev/...        Use this USB serial port instead of exact-one detection
   --bridge-url URL       Override the detected private-LAN device-feed URL
   --no-open              Compatibility flag; captive portal now owns fallback
@@ -77,6 +78,8 @@ while [[ $# -gt 0 ]]; do
       need_value "$@"; FIRMWARE_VERSION="$2"; shift 2 ;;
     --manifest-url)
       need_value "$@"; MANIFEST_URL="$2"; shift 2 ;;
+    --manifest-sha256)
+      need_value "$@"; MANIFEST_SHA256="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"; shift 2 ;;
     --board)
       need_value "$@"; BOARD="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"; shift 2 ;;
     --port)
@@ -108,6 +111,15 @@ fi
 if [[ "$ALLOW_TEST_ARTIFACTS" == "1" && -z "$MANIFEST_URL" ]]; then
   die "test-artifact mode requires an explicit --manifest-url"
 fi
+if [[ -n "$MANIFEST_URL" && "$ALLOW_TEST_ARTIFACTS" != "1" ]]; then
+  die "explicit manifest URLs are limited to test-artifact mode"
+fi
+if [[ -n "$FIRMWARE_VERSION" && ! "$MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+  die "production firmware requires an exact --manifest-sha256"
+fi
+if [[ -n "$MANIFEST_SHA256" && -z "$FIRMWARE_VERSION" && -z "$MANIFEST_URL" ]]; then
+  die "--manifest-sha256 requires a firmware source"
+fi
 if [[ "$SAMPLE" == "1" && ( -n "$FIRMWARE_VERSION" || -n "$MANIFEST_URL" || -n "$BOARD" || -n "$SERIAL_PORT" ) ]]; then
   die "sample mode does not flash firmware"
 fi
@@ -120,7 +132,7 @@ fi
 if [[ -z "${HOME:-}" || "$HOME" != /* || "$HOME" == "/" ]]; then
   die "HOME must be a safe absolute user directory"
 fi
-case "$HOME$FIRMWARE_VERSION$MANIFEST_URL$BOARD$SERIAL_PORT$BRIDGE_URL" in
+case "$HOME$FIRMWARE_VERSION$MANIFEST_URL$MANIFEST_SHA256$BOARD$SERIAL_PORT$BRIDGE_URL" in
   *$'\n'*|*$'\r'*|*$'\t'*) die "an installer argument contains a control character" ;;
 esac
 
@@ -284,6 +296,7 @@ if [[ -n "$FIRMWARE_VERSION" ]]; then
 else
   onboard_arguments+=(--manifest-url "$MANIFEST_URL")
 fi
+[[ -n "$MANIFEST_SHA256" ]] && onboard_arguments+=(--manifest-sha256 "$MANIFEST_SHA256")
 [[ -n "$BOARD" ]] && onboard_arguments+=(--board "$BOARD")
 [[ -n "$SERIAL_PORT" ]] && onboard_arguments+=(--port "$SERIAL_PORT")
 [[ -n "$BRIDGE_URL" ]] && onboard_arguments+=(--bridge-url "$BRIDGE_URL")

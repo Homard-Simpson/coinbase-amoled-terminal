@@ -15,33 +15,84 @@ concurrency:
   group: release-firmware-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  ESP_IDF_VERSION: "5.5.2"
+  ESP_IDF_CONTAINER: >-
+    espressif/idf:v5.5.2@sha256:05cbfc42ed2e987b8026722c15bf1d8523d3e4fd1b4ac04d2e4056f5e0918b99
+  FIRMWARE_RELEASE_VERSION: ${{ inputs.version }}
+
 jobs:
   bundle:
     name: Build V1 and V2 bundle (not published)
     runs-on: ubuntu-latest
-    timeout-minutes: 50
-    env:
-      FIRMWARE_RELEASE_VERSION: ${{ inputs.version }}
+    timeout-minutes: 55
 
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Build both revisions with ESP-IDF 5.5.2
-        uses: espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5 # v1.2.0
-        with:
-          esp_idf_version: v5.5.2
-          target: esp32s3
-          path: .
-          command: |
-            ./scripts/build-firmware.sh v1 --ci-placeholder
-            ./scripts/build-firmware.sh v2 --ci-placeholder
-            python3 scripts/generate-release-manifest.py \
-              --build-root firmware/build \
-              --output dist/firmware \
-              --version "$FIRMWARE_RELEASE_VERSION"
+      - name: Require exact version, clean source, and root-safe build
+        run: |
+          [[ "$FIRMWARE_RELEASE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$ ]]
+          test -z "$(git status --porcelain --untracked-files=normal)"
+          grep -F 'idf.py -C "$ROOT"' firmware/scripts/build.sh
+          rm -rf firmware/build/v1 firmware/build/v2 dist/firmware
 
-      - name: Upload checksum manifest and binaries
+      - name: Build both revisions in immutable ESP-IDF 5.5.2 container
+        run: |
+          docker run --rm \
+            --env "FIRMWARE_RELEASE_VERSION=$FIRMWARE_RELEASE_VERSION" \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --workdir /workspace \
+            "$ESP_IDF_CONTAINER" \
+            bash -lc '
+              ./scripts/build-firmware.sh v1 --ci-placeholder
+              ./scripts/build-firmware.sh v2 --ci-placeholder
+            '
+          test -z "$(git status --porcelain --untracked-files=normal)"
+
+      - name: Generate immutable manifest, checksums, and unsigned provenance
+        run: |
+          python3 scripts/generate-release-manifest.py \
+            --build-root firmware/build \
+            --output dist/firmware \
+            --version "$FIRMWARE_RELEASE_VERSION" \
+            --source-commit "$GITHUB_SHA" \
+            --source-tree-clean
+
+      - name: Verify checksums, schema binding, and safety scans
+        run: |
+          python3 scripts/scan_public_safety.py .
+          (cd dist/firmware && sha256sum --check SHA256SUMS)
+          python3 scripts/scan-release-artifacts.py dist/firmware/*.bin
+          python3 - <<'PY'
+          import hashlib
+          import importlib.util
+          import os
+          from pathlib import Path
+          import sys
+
+          path = Path("installer/firmware_installer.py")
+          spec = importlib.util.spec_from_file_location("release_verifier", path)
+          assert spec is not None and spec.loader is not None
+          verifier = importlib.util.module_from_spec(spec)
+          sys.modules[spec.name] = verifier
+          spec.loader.exec_module(verifier)
+          manifest_path = Path("dist/firmware/firmware-manifest.json")
+          digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+          version = os.environ["FIRMWARE_RELEASE_VERSION"]
+          manifest = verifier.load_manifest(
+              manifest_path.resolve().as_uri(),
+              expected_release_version=version,
+              expected_manifest_sha256=digest,
+              allow_test_url=True,
+          )
+          assert manifest.release_version == version
+          assert manifest.evidence.production_ready is False
+          assert manifest.evidence.client_signature_verified is False
+          PY
+
+      - name: Upload non-published release evidence bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: firmware-release-bundle-${{ inputs.version }}-NOT-PUBLISHED
@@ -49,7 +100,8 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: State publication boundary
+      - name: State publication and trust boundary
         run: |
           echo "This workflow does not create or publish a GitHub release."
-          echo "Manifest readiness, controls, and hardware-attestation flags remain false."
+          echo "production_ready remains false."
+          echo "Remaining blocker: no trusted client-side signature key/signature verification."
