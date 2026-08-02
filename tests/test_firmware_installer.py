@@ -14,6 +14,9 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "installer" / "firmware_installer.py"
 SPEC = importlib.util.spec_from_file_location("firmware_installer", MODULE_PATH)
@@ -28,6 +31,13 @@ assert GENERATOR_SPEC is not None and GENERATOR_SPEC.loader is not None
 GENERATOR = importlib.util.module_from_spec(GENERATOR_SPEC)
 sys.modules[GENERATOR_SPEC.name] = GENERATOR
 GENERATOR_SPEC.loader.exec_module(GENERATOR)
+
+SIGNER_PATH = ROOT / "scripts" / "sign-release-manifest.py"
+SIGNER_SPEC = importlib.util.spec_from_file_location("sign_release_manifest", SIGNER_PATH)
+assert SIGNER_SPEC is not None and SIGNER_SPEC.loader is not None
+SIGNER = importlib.util.module_from_spec(SIGNER_SPEC)
+sys.modules[SIGNER_SPEC.name] = SIGNER
+SIGNER_SPEC.loader.exec_module(SIGNER)
 
 
 def synthetic_esp_image(data: bytes, *, load_address: int) -> bytes:
@@ -141,6 +151,10 @@ def release_fixture(
             "hardware_attested": {"v1": False, "v2": False},
             "trust_blocker": GENERATOR.TRUST_BLOCKER,
         },
+        "source": {
+            "repository": FIRMWARE.SOURCE_REPOSITORY,
+            "commit": "1" * 40,
+        },
         "variants": variants,
     }
     manifest["manifest_id"] = FIRMWARE.compute_manifest_id(manifest)
@@ -148,6 +162,52 @@ def release_fixture(
     path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     return path, blobs, digest
+
+
+def sign_fixture(path: Path) -> tuple[bytes, Ed25519PrivateKey]:
+    signing_key = Ed25519PrivateKey.generate()
+    public_key = signing_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    with tempfile.TemporaryDirectory() as key_directory:
+        key_path = Path(key_directory) / "test-signing-key.pem"
+        key_path.write_bytes(
+            signing_key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+        )
+        key_path.chmod(0o600)
+        SIGNER.sign_release_manifest(
+            path,
+            key_path=key_path,
+            expected_public_key=public_key,
+            key_id=FIRMWARE.RELEASE_KEY_ID,
+        )
+    return public_key, signing_key
+
+
+def write_test_signature(
+    path: Path,
+    signing_key: Ed25519PrivateKey,
+    **overrides: object,
+) -> None:
+    payload = path.read_bytes()
+    envelope = {
+        "schema_version": FIRMWARE.SIGNATURE_SCHEMA_VERSION,
+        "algorithm": FIRMWARE.SIGNATURE_ALGORITHM,
+        "key_id": FIRMWARE.RELEASE_KEY_ID,
+        "manifest_sha256": hashlib.sha256(payload).hexdigest(),
+        "signature": FIRMWARE.base64.urlsafe_b64encode(signing_key.sign(payload))
+        .rstrip(b"=")
+        .decode("ascii"),
+    }
+    envelope.update(overrides)
+    path.with_name(path.name + ".sig").write_text(
+        json.dumps(envelope, sort_keys=True), encoding="ascii"
+    )
 
 
 def rewrite_manifest(path: Path, mutate) -> dict[str, object]:
@@ -159,6 +219,131 @@ def rewrite_manifest(path: Path, mutate) -> dict[str, object]:
 
 
 class ManifestTrustTests(unittest.TestCase):
+    def test_valid_ed25519_signature_is_derived_before_manifest_trust(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path, _blobs, _digest = release_fixture(Path(temporary))
+            public_key, _signing_key = sign_fixture(path)
+            manifest = FIRMWARE.load_manifest(
+                path.as_uri(),
+                expected_release_version="v1.2.3",
+                expected_source_commit="1" * 40,
+                allow_test_url=True,
+                _test_public_key=public_key,
+            )
+            self.assertTrue(manifest.signature_verified)
+            self.assertTrue(manifest.evidence.client_signature_verified)
+            self.assertEqual(manifest.source_commit, "1" * 40)
+            with self.assertRaisesRegex(
+                FIRMWARE.FirmwareInstallError, "source commit did not match"
+            ):
+                FIRMWARE.load_manifest(
+                    path.as_uri(),
+                    expected_source_commit="2" * 40,
+                    allow_test_url=True,
+                    _test_public_key=public_key,
+                )
+            with self.assertRaisesRegex(FIRMWARE.FirmwareInstallError, "cannot be used"):
+                FIRMWARE.load_manifest(
+                    FIRMWARE.official_manifest_url("v1.2.3"),
+                    expected_release_version="v1.2.3",
+                    expected_source_commit="1" * 40,
+                    _test_public_key=public_key,
+                )
+
+    def test_tampered_manifest_signature_wrong_key_and_missing_signature_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path, _blobs, _digest = release_fixture(root)
+            public_key, _signing_key = sign_fixture(path)
+            payload = bytearray(path.read_bytes())
+            payload[-2] ^= 1
+            path.write_bytes(payload)
+            with self.assertRaisesRegex(FIRMWARE.FirmwareInstallError, "hash did not match"):
+                FIRMWARE.load_manifest(
+                    path.as_uri(), allow_test_url=True, _test_public_key=public_key
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path, _blobs, _digest = release_fixture(Path(temporary))
+            public_key, _signing_key = sign_fixture(path)
+            envelope_path = path.with_name(path.name + ".sig")
+            envelope = json.loads(envelope_path.read_text())
+            signature = envelope["signature"]
+            envelope["signature"] = ("A" if signature[0] != "A" else "B") + signature[1:]
+            envelope_path.write_text(json.dumps(envelope), encoding="ascii")
+            with self.assertRaisesRegex(FIRMWARE.FirmwareInstallError, "verification failed"):
+                FIRMWARE.load_manifest(
+                    path.as_uri(), allow_test_url=True, _test_public_key=public_key
+                )
+            wrong_public_key = (
+                Ed25519PrivateKey.generate()
+                .public_key()
+                .public_bytes(
+                    encoding=serialization.Encoding.Raw,
+                    format=serialization.PublicFormat.Raw,
+                )
+            )
+            write_test_signature(path, _signing_key)
+            with self.assertRaisesRegex(FIRMWARE.FirmwareInstallError, "verification failed"):
+                FIRMWARE.load_manifest(
+                    path.as_uri(), allow_test_url=True, _test_public_key=wrong_public_key
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path, _blobs, _digest = release_fixture(Path(temporary))
+            public_key = (
+                Ed25519PrivateKey.generate()
+                .public_key()
+                .public_bytes(
+                    encoding=serialization.Encoding.Raw,
+                    format=serialization.PublicFormat.Raw,
+                )
+            )
+            with self.assertRaisesRegex(FIRMWARE.FirmwareInstallError, "invalid size"):
+                FIRMWARE.load_manifest(
+                    path.as_uri(), allow_test_url=True, _test_public_key=public_key
+                )
+
+    def test_signature_envelope_fields_are_strict(self) -> None:
+        cases = (
+            ("key_id", "other-key", "key is untrusted"),
+            ("algorithm", "Ed448", "algorithm is unsupported"),
+            ("schema_version", 2, "schema is unsupported"),
+            ("manifest_sha256", "0" * 64, "hash did not match"),
+        )
+        for field, value, message in cases:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temporary:
+                path, _blobs, _digest = release_fixture(Path(temporary))
+                public_key, signing_key = sign_fixture(path)
+                write_test_signature(path, signing_key, **{field: value})
+                with self.assertRaisesRegex(FIRMWARE.FirmwareInstallError, message):
+                    FIRMWARE.load_manifest(
+                        path.as_uri(), allow_test_url=True, _test_public_key=public_key
+                    )
+
+    def test_signature_evidence_cannot_contradict_cryptographic_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path, _blobs, _digest = release_fixture(Path(temporary))
+            public_key, signing_key = sign_fixture(path)
+            raw = json.loads(path.read_text())
+            raw["release_evidence"]["client_signature_verified"] = False
+            raw["manifest_id"] = FIRMWARE.compute_manifest_id(raw)
+            path.write_text(json.dumps(raw, sort_keys=True), encoding="ascii")
+            write_test_signature(path, signing_key)
+            with self.assertRaisesRegex(FIRMWARE.FirmwareInstallError, "contradictory"):
+                FIRMWARE.load_manifest(
+                    path.as_uri(), allow_test_url=True, _test_public_key=public_key
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path, _blobs, _digest = release_fixture(Path(temporary))
+            raw = json.loads(path.read_text())
+            raw["release_evidence"]["client_signature_verified"] = True
+            raw["manifest_id"] = FIRMWARE.compute_manifest_id(raw)
+            path.write_text(json.dumps(raw, sort_keys=True), encoding="ascii")
+            with self.assertRaisesRegex(FIRMWARE.FirmwareInstallError, "contradictory"):
+                FIRMWARE.load_manifest(path.as_uri(), allow_test_url=True)
+
     def test_manifest_and_every_artifact_receive_semantic_and_sha256_validation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -183,7 +368,7 @@ class ManifestTrustTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 FIRMWARE.FirmwareInstallError,
-                "client-side signature verification",
+                "fully attested",
             ):
                 FIRMWARE.require_release_readiness(
                     manifest,
@@ -236,9 +421,9 @@ class ManifestTrustTests(unittest.TestCase):
             FIRMWARE.load_manifest(
                 mutable,
                 expected_release_version="v1.2.3",
-                expected_manifest_sha256="0" * 64,
+                expected_source_commit="1" * 40,
             )
-        with self.assertRaisesRegex(FIRMWARE.FirmwareInstallError, "SHA-256"):
+        with self.assertRaisesRegex(FIRMWARE.FirmwareInstallError, "source commit"):
             FIRMWARE.load_manifest(
                 FIRMWARE.official_manifest_url("v1.2.3"),
                 expected_release_version="v1.2.3",
@@ -592,6 +777,21 @@ class ReleaseGeneratorAndRootBuildTests(unittest.TestCase):
             for line in checksum_lines:
                 digest, name = line.split("  ", 1)
                 self.assertEqual(hashlib.sha256((output / name).read_bytes()).hexdigest(), digest)
+
+            public_key, _signing_key = sign_fixture(destination)
+            signed = FIRMWARE.load_manifest(
+                destination.as_uri(),
+                allow_test_url=True,
+                _test_public_key=public_key,
+            )
+            signed_provenance = json.loads((output / "firmware-provenance.json").read_text())
+            signed_checksums = (output / "SHA256SUMS").read_text().splitlines()
+            self.assertTrue(signed.signature_verified)
+            self.assertTrue(signed.evidence.client_signature_verified)
+            self.assertFalse(signed.evidence.production_ready)
+            self.assertTrue(signed_provenance["signed"])
+            self.assertEqual(len(signed_checksums), 12)
+            self.assertIn("firmware-manifest.json.sig", "\n".join(signed_checksums))
 
     def test_root_build_entrypoint_passes_firmware_project_to_every_idf_call(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

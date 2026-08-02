@@ -193,7 +193,9 @@ exit 91
         self.assertNotIn("curl ", script)
         self.assertNotIn("COINBASE_API_PRIVATE_KEY=", script)
         self.assertIn('readonly DEFAULT_FIRMWARE_VERSION=""', script)
-        self.assertIn("--manifest-sha256", script)
+        self.assertNotIn("--manifest-sha256", script)
+        self.assertIn('SOURCE_REF="$FIRMWARE_VERSION"', script)
+        self.assertIn('checkout --detach "refs/tags/$FIRMWARE_VERSION"', script)
         self.assertIn('"esptool>=4.8,<5"', script)
         self.assertIn('"$SOURCE_DIR/installer/onboard_device.py"', script)
         self.assertIn("production firmware assets are not published yet", script)
@@ -337,31 +339,16 @@ exit 91
             self.assertIn("--allow-unverified-test-artifacts", invocation)
             self.assertIn("--non-interactive", invocation)
 
-    def test_production_version_requires_and_forwards_exact_manifest_identity(self) -> None:
+    def test_production_version_only_pins_source_tag_and_needs_no_digest(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_name:
             temporary = Path(temporary_name)
             environment, _, invocation_log = self._fake_environment(temporary)
-            missing_digest = subprocess.run(
-                ["/bin/bash", str(INSTALLER), "--version", "v1.2.3"],
-                check=False,
-                text=True,
-                capture_output=True,
-                env=environment,
-                timeout=30,
-            )
-            self.assertNotEqual(missing_digest.returncode, 0)
-            self.assertIn("requires an exact --manifest-sha256", missing_digest.stderr)
-            self.assertFalse((temporary / "data home").exists())
-
-            digest = "a" * 64
             completed = subprocess.run(
                 [
                     "/bin/bash",
                     str(INSTALLER),
                     "--version",
                     "v1.2.3",
-                    "--manifest-sha256",
-                    digest,
                     "--board",
                     "v1",
                     "--port",
@@ -379,7 +366,7 @@ exit 91
             self.assertEqual(completed.returncode, 0, completed.stderr)
             invocation = invocation_log.read_text(encoding="utf-8")
             self.assertIn("--version v1.2.3", invocation)
-            self.assertIn(f"--manifest-sha256 {digest}", invocation)
+            self.assertNotIn("manifest-sha256", invocation)
 
     def test_public_default_fails_before_install_until_release_exists(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_name:

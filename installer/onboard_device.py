@@ -28,6 +28,7 @@ from firmware_installer import (
     build_setup_partition,
     detect_serial_port,
     download_variant,
+    installed_source_commit,
     load_manifest,
     official_manifest_url,
     require_release_readiness,
@@ -114,7 +115,6 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--version")
     source.add_argument("--manifest-url")
     parser.add_argument("--data-dir", required=True)
-    parser.add_argument("--manifest-sha256")
     parser.add_argument("--port")
     parser.add_argument("--board", choices=("v1", "v2"))
     parser.add_argument("--bridge-url")
@@ -169,14 +169,16 @@ def main() -> int:
         provisioning = recovered
         if provisioning is None:
             manifest_url = (
-                args.manifest_url
-                if args.manifest_url
-                else official_manifest_url(args.version)
+                args.manifest_url if args.manifest_url else official_manifest_url(args.version)
             )
             manifest = load_manifest(
                 manifest_url,
                 expected_release_version=args.version,
-                expected_manifest_sha256=args.manifest_sha256,
+                expected_source_commit=(
+                    None
+                    if args.allow_unverified_test_artifacts
+                    else installed_source_commit(Path(__file__).resolve().parents[1])
+                ),
                 allow_test_url=args.allow_unverified_test_artifacts,
             )
             board = select_board(
@@ -189,7 +191,7 @@ def main() -> int:
             require_release_readiness(
                 manifest,
                 board=board,
-                allow_test_url=args.allow_unverified_test_artifacts,
+                allow_unverified_test_artifacts=args.allow_unverified_test_artifacts,
             )
             print(f"Using the explicit {board.upper()} physical-board selection.")
             server = create_onboarding_server(
@@ -256,9 +258,7 @@ def main() -> int:
         except Exception as exc:
             if pending_running:
                 pending_server.app.set_status("rejected")
-                pending_server.app.terminal_event.wait(
-                    timeout=PENDING_REJECTION_GRACE_SECONDS
-                )
+                pending_server.app.terminal_event.wait(timeout=PENDING_REJECTION_GRACE_SECONDS)
             raise FirmwareInstallError(
                 "the claimed setup was rejected or could not activate safely"
             ) from exc

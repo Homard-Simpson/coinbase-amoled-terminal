@@ -36,8 +36,8 @@ COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 SOURCE_REPOSITORY = "https://github.com/Homard-Simpson/coinbase-amoled-terminal"
 BUILD_WORKFLOW = ".github/workflows/release-firmware.yml"
 TRUST_BLOCKER = (
-    "No trusted client-side signature verification key/signature is implemented; "
-    "SHA-256 pinning still requires an independently authenticated manifest digest."
+    "This test bundle is unsigned and lacks verified physical-control and V1/V2 hardware "
+    "attestations; it must not be published as a production release."
 )
 
 
@@ -149,6 +149,10 @@ def generate(
             "client_signature_verified": False,
             "hardware_attested": {"v1": False, "v2": False},
             "trust_blocker": TRUST_BLOCKER,
+        },
+        "source": {
+            "repository": source_repository,
+            "commit": source_commit,
         },
         "variants": variants,
     }

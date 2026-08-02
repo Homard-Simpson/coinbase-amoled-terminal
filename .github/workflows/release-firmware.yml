@@ -31,6 +31,16 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Set up manifest verifier
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: bridge/requirements.txt
+
+      - name: Install manifest verifier dependency
+        run: python -m pip install --disable-pip-version-check -r bridge/requirements.txt
+
       - name: Require exact version, clean source, and root-safe build
         run: |
           [[ "$FIRMWARE_RELEASE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$ ]]
@@ -51,7 +61,7 @@ jobs:
             '
           test -z "$(git status --porcelain --untracked-files=normal)"
 
-      - name: Generate immutable manifest, checksums, and unsigned provenance
+      - name: Generate unsigned test manifest, checksums, and provenance
         run: |
           python3 scripts/generate-release-manifest.py \
             --build-root firmware/build \
@@ -88,6 +98,7 @@ jobs:
               allow_test_url=True,
           )
           assert manifest.release_version == version
+          assert manifest.signature_verified is False
           assert manifest.evidence.production_ready is False
           assert manifest.evidence.client_signature_verified is False
           PY
@@ -95,7 +106,7 @@ jobs:
       - name: Upload non-published release evidence bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: firmware-release-bundle-${{ inputs.version }}-NOT-PUBLISHED
+          name: firmware-unsigned-test-bundle-${{ inputs.version }}-NOT-PUBLISHED
           path: dist/firmware/
           if-no-files-found: error
           retention-days: 7
@@ -103,5 +114,6 @@ jobs:
       - name: State publication and trust boundary
         run: |
           echo "This workflow does not create or publish a GitHub release."
+          echo "The uploaded test bundle is intentionally unsigned."
           echo "production_ready remains false."
-          echo "Remaining blocker: no trusted client-side signature key/signature verification."
+          echo "Remaining blockers: release signing, controls verification, and V1/V2 hardware attestation."

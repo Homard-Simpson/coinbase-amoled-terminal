@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hashlib
 import ipaddress
 import json
 import os
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -22,13 +25,16 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
 MANIFEST_SCHEMA_VERSION = 2
 PROVENANCE_SCHEMA_VERSION = 1
 ESP_IDF_VERSION = "5.5.2"
 ESP_IDF_CONTAINER_IMAGE = "espressif/idf:v5.5.2"
 ESP_IDF_CONTAINER_DIGEST = "sha256:05cbfc42ed2e987b8026722c15bf1d8523d3e4fd1b4ac04d2e4056f5e0918b99"
-CLIENT_SIGNATURE_VERIFICATION_AVAILABLE = False
 MAX_MANIFEST_BYTES = 256 * 1024
+MAX_SIGNATURE_ENVELOPE_BYTES = 2 * 1024
 MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
 DOWNLOAD_CHUNK_BYTES = 64 * 1024
 DOWNLOAD_SOCKET_TIMEOUT_SECONDS = 10.0
@@ -59,6 +65,13 @@ TRUSTED_RELEASE_REDIRECT_HOSTS = frozenset(
 )
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 VERSION_RE = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$")
+COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+BASE64URL_SIGNATURE_RE = re.compile(r"^[A-Za-z0-9_-]{86}$")
+SIGNATURE_SCHEMA_VERSION = 1
+SIGNATURE_ALGORITHM = "Ed25519"
+RELEASE_KEY_ID = "coinbase-amoled-release-2026-01"
+RELEASE_PUBLIC_KEY_BASE64URL = "ML2pnwDhcXx1Bo_TI0OwH5YbMtJSsn40_OPSf0tAT_I"
+SOURCE_REPOSITORY = "https://github.com/Homard-Simpson/coinbase-amoled-terminal"
 EXPECTED_OFFSETS = {
     "bootloader": 0x0,
     "partition_table": 0x8000,
@@ -148,8 +161,11 @@ class FirmwareManifest:
     esp_idf_container_digest: str
     evidence: ReleaseEvidence
     variants: dict[str, VariantManifest]
+    source_repository: str
+    source_commit: str
     source_url: str
     test_mode: bool
+    signature_verified: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +193,84 @@ def official_manifest_url(version: str) -> str:
     return (
         OFFICIAL_RELEASE_PREFIX + urllib.parse.quote(version, safe="") + "/firmware-manifest.json"
     )
+
+
+def manifest_signature_url(manifest_url: str) -> str:
+    return manifest_url + ".sig"
+
+
+def _decode_base64url(value: str, *, expected_bytes: int) -> bytes:
+    if not BASE64URL_SIGNATURE_RE.fullmatch(value) or "=" in value:
+        raise FirmwareInstallError("firmware manifest signature is invalid")
+    try:
+        decoded = base64.b64decode(value + "==", altchars=b"-_", validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise FirmwareInstallError("firmware manifest signature is invalid") from exc
+    canonical = base64.urlsafe_b64encode(decoded).rstrip(b"=").decode()
+    if len(decoded) != expected_bytes or canonical != value:
+        raise FirmwareInstallError("firmware manifest signature is invalid")
+    return decoded
+
+
+def _production_public_key() -> bytes:
+    try:
+        value = base64.urlsafe_b64decode(RELEASE_PUBLIC_KEY_BASE64URL + "=")
+    except (binascii.Error, ValueError) as exc:  # pragma: no cover - fixed build constant
+        raise FirmwareInstallError("firmware release trust root is invalid") from exc
+    if len(value) != 32:  # pragma: no cover - fixed build constant
+        raise FirmwareInstallError("firmware release trust root is invalid")
+    return value
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON key")
+        value[key] = item
+    return value
+
+
+def _verify_manifest_signature(
+    payload: bytes,
+    envelope_payload: bytes,
+    *,
+    public_key: bytes,
+    expected_key_id: str,
+) -> None:
+    try:
+        envelope = json.loads(
+            envelope_payload.decode("ascii"), object_pairs_hook=_reject_duplicate_json_keys
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise FirmwareInstallError("firmware manifest signature envelope is invalid") from exc
+    required = {"schema_version", "algorithm", "key_id", "manifest_sha256", "signature"}
+    if not isinstance(envelope, dict) or set(envelope) != required:
+        raise FirmwareInstallError("firmware manifest signature envelope is invalid")
+    if (
+        type(envelope["schema_version"]) is not int
+        or envelope["schema_version"] != SIGNATURE_SCHEMA_VERSION
+    ):
+        raise FirmwareInstallError("firmware manifest signature schema is unsupported")
+    if envelope["algorithm"] != SIGNATURE_ALGORITHM:
+        raise FirmwareInstallError("firmware manifest signature algorithm is unsupported")
+    if envelope["key_id"] != expected_key_id:
+        raise FirmwareInstallError("firmware manifest signature key is untrusted")
+    digest = envelope["manifest_sha256"]
+    if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
+        raise FirmwareInstallError("firmware manifest signature hash is invalid")
+    if digest != hashlib.sha256(payload).hexdigest():
+        raise FirmwareInstallError("firmware manifest signature hash did not match")
+    encoded_signature = envelope["signature"]
+    if not isinstance(encoded_signature, str):
+        raise FirmwareInstallError("firmware manifest signature is invalid")
+    signature = _decode_base64url(encoded_signature, expected_bytes=64)
+    if not isinstance(public_key, bytes) or len(public_key) != 32:
+        raise FirmwareInstallError("firmware release trust root is invalid")
+    try:
+        Ed25519PublicKey.from_public_bytes(public_key).verify(signature, payload)
+    except (InvalidSignature, ValueError) as exc:
+        raise FirmwareInstallError("firmware manifest signature verification failed") from exc
 
 
 def compute_manifest_id(raw: dict[str, Any]) -> str:
@@ -343,13 +437,18 @@ def load_manifest(
     *,
     expected_release_version: str | None = None,
     expected_manifest_sha256: str | None = None,
+    expected_source_commit: str | None = None,
     allow_test_url: bool = False,
+    _test_public_key: bytes | None = None,
+    _test_key_id: str = RELEASE_KEY_ID,
 ) -> FirmwareManifest:
+    if _test_public_key is not None and not allow_test_url:
+        raise FirmwareInstallError("test release trust cannot be used for production")
     if not allow_test_url:
         if expected_release_version is None or not VERSION_RE.fullmatch(expected_release_version):
             raise FirmwareInstallError("an exact firmware release version is required")
-        if expected_manifest_sha256 is None or not SHA256_RE.fullmatch(expected_manifest_sha256):
-            raise FirmwareInstallError("an authenticated manifest SHA-256 is required")
+        if expected_source_commit is None or not COMMIT_RE.fullmatch(expected_source_commit):
+            raise FirmwareInstallError("an exact installed source commit is required")
         if url != official_manifest_url(expected_release_version):
             raise FirmwareInstallError("firmware manifest URL is not the exact requested release")
     elif expected_manifest_sha256 is not None and not SHA256_RE.fullmatch(expected_manifest_sha256):
@@ -364,6 +463,22 @@ def load_manifest(
     payload_digest = hashlib.sha256(payload).hexdigest()
     if expected_manifest_sha256 is not None and payload_digest != expected_manifest_sha256:
         raise FirmwareInstallError("firmware manifest identity did not match")
+    signature_verified = False
+    if not allow_test_url or _test_public_key is not None:
+        envelope_payload = _read_url(
+            manifest_signature_url(url),
+            maximum=MAX_SIGNATURE_ENVELOPE_BYTES,
+            allow_test_url=allow_test_url,
+            release_version=expected_release_version,
+        )
+        public_key = _test_public_key if _test_public_key is not None else _production_public_key()
+        _verify_manifest_signature(
+            payload,
+            envelope_payload,
+            public_key=public_key,
+            expected_key_id=_test_key_id if _test_public_key is not None else RELEASE_KEY_ID,
+        )
+        signature_verified = True
     try:
         raw = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -374,6 +489,7 @@ def load_manifest(
         "manifest_id",
         "build",
         "release_evidence",
+        "source",
         "variants",
     }
     if not isinstance(raw, dict) or set(raw) != expected_fields:
@@ -394,7 +510,12 @@ def load_manifest(
         raise FirmwareInstallError("firmware manifest canonical identity is invalid")
 
     build = _parse_build_identity(raw["build"])
-    evidence = _parse_release_evidence(raw["release_evidence"])
+    source_repository, source_commit = _parse_source_identity(raw["source"])
+    if expected_source_commit is not None and source_commit != expected_source_commit:
+        raise FirmwareInstallError("firmware manifest source commit did not match installed source")
+    evidence = _parse_release_evidence(
+        raw["release_evidence"], signature_verified=signature_verified
+    )
     variants_raw = raw["variants"]
     if not isinstance(variants_raw, dict) or set(variants_raw) != {"v1", "v2"}:
         raise FirmwareInstallError("firmware manifest must contain V1 and V2")
@@ -416,8 +537,11 @@ def load_manifest(
         esp_idf_container_digest=build[2],
         evidence=evidence,
         variants=variants,
+        source_repository=source_repository,
+        source_commit=source_commit,
         source_url=url,
         test_mode=allow_test_url,
+        signature_verified=signature_verified,
     )
 
 
@@ -435,7 +559,18 @@ def _parse_build_identity(raw: Any) -> tuple[str, str, str]:
     return expected
 
 
-def _parse_release_evidence(raw: Any) -> ReleaseEvidence:
+def _parse_source_identity(raw: Any) -> tuple[str, str]:
+    if not isinstance(raw, dict) or set(raw) != {"repository", "commit"}:
+        raise FirmwareInstallError("firmware source identity is invalid")
+    if raw["repository"] != SOURCE_REPOSITORY:
+        raise FirmwareInstallError("firmware source repository is untrusted")
+    commit = raw["commit"]
+    if not isinstance(commit, str) or not COMMIT_RE.fullmatch(commit):
+        raise FirmwareInstallError("firmware source commit is invalid")
+    return SOURCE_REPOSITORY, commit
+
+
+def _parse_release_evidence(raw: Any, *, signature_verified: bool) -> ReleaseEvidence:
     required = {
         "production_ready",
         "controls_verified",
@@ -450,6 +585,8 @@ def _parse_release_evidence(raw: Any) -> ReleaseEvidence:
         for name in ("production_ready", "controls_verified", "client_signature_verified")
     ):
         raise FirmwareInstallError("firmware release evidence flags are invalid")
+    if raw["client_signature_verified"] is not signature_verified:
+        raise FirmwareInstallError("firmware release signature evidence is contradictory")
     attested = raw["hardware_attested"]
     if (
         not isinstance(attested, dict)
@@ -593,13 +730,9 @@ def require_release_readiness(
     if allow_unverified_test_artifacts:
         return
     evidence = manifest.evidence
-    if not CLIENT_SIGNATURE_VERIFICATION_AVAILABLE:
-        raise FirmwareInstallError(
-            "production flashing is blocked because trusted client-side signature verification "
-            "is not implemented"
-        )
     if (
-        evidence.production_ready
+        manifest.signature_verified
+        and evidence.production_ready
         and evidence.controls_verified
         and evidence.client_signature_verified
         and evidence.hardware_attested[board]
@@ -1194,12 +1327,52 @@ def inspect_flash_status(reader: FlashReader) -> dict[str, Any]:
     }
 
 
+def installed_source_commit(source_root: Path) -> str:
+    git_binary = shutil.which("git")
+    if git_binary is None or not os.path.isabs(git_binary):
+        raise FirmwareInstallError("installed source identity could not be verified")
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment.update(
+        {
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+        }
+    )
+    try:
+        completed = subprocess.run(
+            [
+                git_binary,
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+                "-C",
+                str(source_root),
+                "rev-parse",
+                "--verify",
+                "HEAD^{commit}",
+            ],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=10,
+            env=environment,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise FirmwareInstallError("installed source identity could not be verified") from exc
+    commit = completed.stdout.strip()
+    if completed.returncode != 0 or not COMMIT_RE.fullmatch(commit):
+        raise FirmwareInstallError("installed source identity could not be verified")
+    return commit
+
+
 def _main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--status", action="store_true", help="read safe interrupted-flash status")
     parser.add_argument("--manifest-url")
     parser.add_argument("--release-version")
-    parser.add_argument("--manifest-sha256")
     parser.add_argument("--port")
     parser.add_argument("--board", choices=("v1", "v2"))
     parser.add_argument("--non-interactive", action="store_true")
@@ -1214,7 +1387,11 @@ def _main() -> int:
     manifest = load_manifest(
         args.manifest_url,
         expected_release_version=args.release_version,
-        expected_manifest_sha256=args.manifest_sha256,
+        expected_source_commit=(
+            None
+            if args.allow_unverified_test_artifacts
+            else installed_source_commit(Path(__file__).resolve().parents[1])
+        ),
         allow_test_url=args.allow_unverified_test_artifacts,
     )
     board = select_board(
