@@ -35,7 +35,7 @@ Usage:
   install.sh --uninstall [--purge]
 
 Optional flashing arguments:
-  --board v1|v2          Select the physical revision; prompted if omitted
+  --board v1|v2          V1=SH8601 display; V2=CO5300 display; prompted if omitted
   --port /dev/...        Use this USB serial port instead of exact-one detection
   --bridge-url URL       Override the detected private-LAN device-feed URL
   --no-open              Compatibility flag; captive portal now owns fallback

@@ -65,11 +65,22 @@ view-only. A key that can trade or transfer is never saved.
   It has no analytics, external assets, cookies, browser storage, or secret URLs.
 - The read-only bridge runs as your normal user through launchd or systemd.
 
-V1 and V2 firmware are not interchangeable. V1 performs power-controller setup
-that V2 must never receive. If you have a blank or DIY board, use Waveshare's
-[Version Options guide](https://www.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.8#Version_Options)
-before answering the one V1/V2 question. The installer fails closed rather than
-trying both.
+### Which display version do I have?
+
+V1 and V2 refer to the **AMOLED display electronics**, not a different ESP32:
+
+- **V1 — SH8601 display controller** with an FT5x06/FT3168-family touch controller.
+  Choose **V1 / SH8601** in the installer.
+- **V2 — CO5300 display controller** with a CST820/CST816S-family touch controller.
+  Choose **V2 / CO5300** in the installer.
+
+Check the product listing, packaging, board revision, or Waveshare example folder
+for `SH8601` or `CO5300`. Both versions look similar and use the same 368 × 448
+screen, so USB port names and the ESP32-S3 chip cannot identify the display model.
+If it is still unclear, use Waveshare's
+[Version Options guide](https://www.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.8#Version_Options).
+Do not guess or try both: V1 performs display power setup that must not run on the
+V2/CO5300 model.
 
 Safe local sample mode (no Coinbase account, credential, or flashing):
 

@@ -47,15 +47,27 @@ If the display goes blank immediately after initialization:
 
 Do not keep experimenting with PMU register writes on an unidentified board.
 
-## Identifying the revision
+## Identifying your display model
+
+The version is determined by the **display controller fitted to the board**:
+
+- Choose **V1** when the listing, packaging, documentation, or factory example says
+  **SH8601**. Its touch controller is normally FT5x06 or FT3168-family.
+- Choose **V2** when those materials say **CO5300**. Its touch controller is
+  normally CST820 or CST816S-family.
+
+Both models are sold as the Waveshare ESP32-S3 Touch AMOLED 1.8, use an ESP32-S3,
+and have the same 368 × 448 resolution. Therefore the ESP32 chip, USB serial-port
+name, flash size, and physical screen dimensions do not distinguish them.
 
 Use, in order:
 
-1. the revision printed on the board or packaging;
-2. the controller names in the vendor documentation supplied with that unit;
-3. a known-good factory example for that exact revision; and
+1. `V1`, `V2`, `SH8601`, or `CO5300` printed on the board or packaging;
+2. the display-controller name in the seller listing or vendor documentation;
+3. the controller name in the factory example folder supplied with the unit; and
 4. non-destructive boot diagnostics from a previously validated image.
 
+If none of those identifies the controller, stop rather than trying both images.
 Do not identify a board in public documentation by a MAC address, serial number,
 or another globally unique device value. Do not make runtime safety decisions from
 those identifiers.
