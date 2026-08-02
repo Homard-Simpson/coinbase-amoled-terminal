@@ -22,6 +22,10 @@ this threat model is no longer sufficient.
    infrastructure.
 8. V1 and V2 builds cannot accidentally apply unsafe initialization to the wrong
    hardware revision.
+9. Automatic firmware updates cannot install an unauthenticated, cross-board,
+   same/older, prerelease, truncated, or digest-mismatched application.
+10. POWER standby cannot interrupt a V2 automatic OTA write or reuse BOOT for an
+    unrelated power action.
 
 ## Assets
 
@@ -159,10 +163,29 @@ informational and not an execution control.
 panel/touch/PMU behavior.
 
 **Controls:** explicit variant names, separate artifacts, boot-time variant label,
-dual CI builds, release manifest, and hardware checklist.
+dual CI builds, release manifest, hardware checklist, compile-time isolation of
+V1 rail writes, and a narrow cross-variant PWRKEY IRQ write allowlist.
 
 **Residual risk:** manual flashing can still select the wrong file. Physical board
 identification remains an operator responsibility.
+
+### Firmware update substitution or interruption
+
+**Paths:** compromised release metadata, a substituted binary, downgrade,
+cross-board image, truncated transfer, or POWER standby during an inactive-slot
+write.
+
+**Controls:** V2 pins an Ed25519 manifest key and requires production/control/V2
+hardware evidence, a strictly newer stable semantic version, exact project and
+`-v2` identity, signed size and SHA-256, complete ESP-IDF image validation,
+dual-slot selection, and rollback. The automatic updater holds a standby gate
+through metadata checks and image writing; POWER standby waits or stays awake.
+Manual OTA remains physically armed and defers standby while its window is open.
+V1 has no automatic updater.
+
+**Residual risk:** baseline boards do not enable Secure Boot or flash encryption,
+so physical possession can replace firmware. GitHub, CI, the signing key, and the
+review process remain supply-chain trust anchors.
 
 ### Supply-chain compromise
 
@@ -170,7 +193,8 @@ identification remains an operator responsibility.
 malicious pull request, or substituted release binary.
 
 **Controls:** dependency lock/manifest review, Dependabot, CodeQL, least-privilege
-workflow permissions, protected branches, checksums, signed tags/artifacts where
+workflow permissions, protected branches, pinned Ed25519 release-manifest
+verification for V2 automatic OTA, checksums, signed tags/artifacts where
 available, and clean-clone release builds.
 
 **Residual risk:** external build services and package registries are trusted. A
@@ -181,9 +205,9 @@ fully reproducible toolchain is a future goal.
 **Paths:** visible portfolio values, stolen board, flash extraction, or debug-port
 access.
 
-**Controls:** screen-off behavior, minimized payload, unique device token, NVS
-erase before transfer, deprovisioning, and optional flash-encryption/secure-boot
-guidance for advanced operators.
+**Controls:** volatile privacy mode, POWER-only standby/wake, minimized payload,
+unique device token, NVS erase before transfer, deprovisioning, and optional
+flash-encryption/secure-boot guidance for advanced operators.
 
 **Residual risk:** baseline development boards are not tamper resistant. Assume
 physical possession can expose device configuration.
@@ -211,7 +235,8 @@ regression.
 | Dual-board safety | Clean V1/V2 builds plus hardware smoke test |
 | Minimal workflow privilege | Review explicit GitHub Actions `permissions` blocks |
 | Dependency health | Dependabot, `pip-audit`, component manifest review |
-| Release integrity | Checksums, signed tag/artifact where available, two-person review |
+| Release integrity | Pinned Ed25519 manifest verification, signed size/SHA-256/board/version checks, rollback, two-person review |
+| Physical controls | Host threshold/allowlist tests plus real V1/V2 POWER/BOOT smoke tests |
 
 ## Review triggers
 

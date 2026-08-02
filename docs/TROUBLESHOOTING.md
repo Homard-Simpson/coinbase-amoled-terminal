@@ -4,6 +4,105 @@ Start with the smallest safe check. Do not paste credentials, feed tokens, accou
 payloads, unique device identifiers, private hostnames, network addresses, or
 uncropped display photos into an issue.
 
+## Two-step installer or captive portal fails
+
+### Git or Python prerequisite is missing
+
+Install Git and Python 3.11 or newer (including Python's `venv` support) through
+your operating system's supported package manager, then rerun the approved Step 1
+command. The installer intentionally does not request administrator access or
+silently run privileged commands. Docker is not required.
+
+### Firmware manifest or download fails
+
+The installer treats HTTP, manifest, size, and SHA-256 failures as fatal and never
+flashes a partial download. Confirm normal HTTPS access to the exact versioned
+GitHub release and retry. Do not bypass a mismatch or substitute an artifact from
+another board. The public default intentionally fails until approved production
+assets exist.
+
+### The installer cannot find the display
+
+Use a USB data cable. Disconnect other USB serial boards, leave one display
+connected, and run the same install command again. The installer deliberately
+stops on zero or multiple candidates.
+
+USB names and ESP chip details cannot safely distinguish V1 from V2. An existing
+official firmware is auto-identified only when its exact application hash appears
+in the accepted release manifest. Otherwise inspect the board with the linked
+Waveshare guide and answer the single V1/V2 question. Never try both images.
+
+### The setup Wi-Fi or captive page does not open
+
+Check the display for its protected setup Wi-Fi name and password. Join it, then
+open `http://192.168.4.1` if the captive page does not appear. The page has no
+external assets, so it renders while the computer is off its normal Wi-Fi.
+
+If it says the setup session expired, rerun the approved installer command over
+USB. That creates fresh one-time setup and CSRF values without erasing unrelated
+NVS.
+
+### The setup page rejects the key file
+
+- Choose the original JSON downloaded from Coinbase, or paste that JSON into the
+  captive portal or localhost fallback page.
+- Confirm it has text fields named `name` and `privateKey`.
+- Create a Coinbase CDP **ECDSA / ES256 / P-256** key. Legacy API secrets,
+  Ed25519, RSA, encrypted PEMs, and other curves are unsupported.
+- Never paste the key into an issue, ESP endpoint, command, environment variable,
+  or log.
+
+### Permission validation refuses the key
+
+This is the safety gate working. In Coinbase, remove trade and transfer access and
+keep only view access, or create a new dedicated view-only key. Press Finish again
+with the corrected JSON. Nothing is stored or sent to the display when this check
+fails.
+
+### The captive page says localhost is blocked
+
+Some operating-system captive mini-browsers block access to localhost. Press
+**Open setup on this computer**. Complete the same form in the full browser, then
+return to the display portal and press its final save button. Do not move setup to
+a phone: the authenticated endpoint is bound to the computer that ran Step 1.
+
+If a full Chrome browser also fails, rerun Step 1 to replace an expired session.
+Do not disable browser security or expose the localhost endpoint on the LAN.
+
+### The user service cannot start
+
+Setup stops before provisioning the display and rolls back new local state. Inspect
+the user service without elevated access:
+
+```bash
+# Linux
+systemctl --user status coinbase-amoled-bridge.service
+
+# macOS
+launchctl print "gui/$(id -u)/com.homardsimpson.coinbase-amoled-bridge"
+```
+
+Common causes are a headless Linux session without a user service bus, a disabled
+user manager, or a stale service file. Fix that user-session issue, then rerun
+Step 1. Never copy a Coinbase key into a unit file.
+
+### The display cannot reach the feed after setup
+
+- Keep the computer and display on the same trusted LAN.
+- Confirm the computer firewall permits local port `8788`; never add router port
+  forwarding.
+- Rerun the same approved version. Existing private state is preserved unless a
+  full replacement transaction succeeds.
+- For guest/public or cross-network access, use private HTTPS/tailnet deployment.
+
+### I only want to test the installer
+
+Use sample mode. It creates no Coinbase credential and makes no Coinbase request:
+
+```bash
+./install.sh --sample
+```
+
 ## Preflight fails
 
 ### Missing Ruff, pytest, ShellCheck, markdownlint-cli2, actionlint, or Docker

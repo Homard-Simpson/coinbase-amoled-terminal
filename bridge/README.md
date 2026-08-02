@@ -91,12 +91,45 @@ python -m pip install --upgrade pip
 python -m pip install -e .
 ```
 
+## Secure local onboarding
+
+The root installer imports the bridge's onboarding coordinator, creates a
+short-lived localhost-only HTTP server, and writes only that session's opaque
+metadata to the ESP over USB. The user then joins the display setup AP and enters
+home Wi-Fi plus Coinbase's downloaded `name`/`privateKey` JSON in the captive
+portal.
+
+Portal JavaScript sends the Coinbase JSON directly to the authenticated localhost
+endpoint. The ESP never receives or reads it. The bridge validates unencrypted
+P-256/ES256, refuses Legacy/Ed25519/RSA/oversized input, enforces
+`/key_permissions`, and makes one bounded read-only product GET before atomically
+writing the owner-only credential bundle.
+
+The bridge then creates the display's UUIDv4 and revocable token. It returns only
+feed URL, device ID, and token to the browser, which builds a separate allowlisted
+ESP `/save` request containing those safe values plus Wi-Fi. A failed validation
+writes nothing; a later coordinator/service failure restores the prior credential,
+configuration, token-file, and service state.
+
+Session, authorization, and CSRF values are independent, random, expiring, and
+single-use. Strict loopback Host, exact portal/localhost Origin, CORS/PNA, body,
+method, content-type, and request-header checks protect the endpoint. Pages use no
+external assets, cookies, analytics, redirects, browser storage, credential URLs,
+or autocomplete. A same-computer fallback page covers captive mini-browsers that
+block localhost. See [secure onboarding](../docs/SECURE_ONBOARDING.md).
+
+The older terminal `quickstart` remains available as an advanced local recovery
+path, but the consumer installer does not ask users to paste credentials into a
+terminal.
+
 ## Offline/sample quick start
 
 Sample mode does not read Coinbase credentials or make network requests, but it
 still requires device authentication.
 
 ```sh
+coinbase-amoled-bridge --data-dir ./data quickstart --sample
+# Or use the lower-level commands:
 coinbase-amoled-bridge --data-dir ./data setup --sample --non-interactive
 coinbase-amoled-bridge --data-dir ./data doctor --sample
 coinbase-amoled-bridge --data-dir ./data serve --sample

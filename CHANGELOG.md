@@ -8,6 +8,8 @@ public releases begin.
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-08-02
+
 ### Added
 
 - Public-ready project documentation and governance policies.
@@ -24,11 +26,36 @@ public releases begin.
   intended for CERN-OHL-S-2.0.
 - Commercial-licensing, contributor-agreement, and trademark policies supporting
   optional proprietary exceptions while preserving royalty-free copyleft resale.
+- A two-step macOS/Linux installer with isolated Python environment, per-user
+  launchd/systemd service, idempotent updates, safe uninstall, and offline sample
+  mode.
+- A secure captive-portal flow backed by a short-lived localhost endpoint. The
+  browser sends Coinbase JSON directly to the computer, while a separate ESP
+  request contains only Wi-Fi and revocable device credentials.
+- Real USB flashing and one-time onboarding-partition provisioning with isolated
+  esptool, versioned SHA-256 manifests, exact-hash board detection, and an
+  explicit fail-closed V1/V2 choice for blank or DIY boards.
+- A production release gate: public installation remains disabled until signed
+  artifacts, controls, and both hardware checklists are verified.
+- V2-only forward automatic OTA using the pinned Ed25519 release-manifest key,
+  signed SHA-256/board/version checks, dual slots, and rollback.
+- A consolidated battery/time header and subtle left-side price levels on token
+  charts for both board variants, with bridge-local time rendered in fixed-width
+  12-hour AM/PM format.
+- The production physical-control contract on both variants: POWER-only
+  standby/wake; BOOT short blue action; BOOT 0.8–<10 second privacy toggle; and
+  uninterrupted 10-second manual OTA arming.
+- Standby coordination that pauses feed/touch/Wi-Fi and prevents POWER from
+  interrupting an active signed V2 automatic update.
 
 ### Security
 
 - Documented a local-bridge credential boundary and no-trading invariant.
 - Added repository preflight checks for common secrets and personal
   infrastructure.
-
-No stable version has been released.
+- Local onboarding rejects Legacy, Ed25519, non-P-256, malformed, and oversized
+  keys; enforces the live view-only permission gate before storage; uses expiring
+  single-use setup/CSRF tokens with strict Origin/CORS/PNA; and rolls back failed
+  provisioning.
+- Installer scripts and service templates are included in shell, lint, test, and
+  public-safety CI gates.

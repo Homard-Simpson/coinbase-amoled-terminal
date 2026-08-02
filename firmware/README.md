@@ -9,7 +9,7 @@ The ESP never connects to Coinbase or stores exchange API keys. It performs one 
 | Build | Display | Touch | Power / reset |
 |---|---|---|---|
 | `v1` | SH8601 | FT5x06 / FT3168 | TCA9554 + AXP2101 |
-| `v2` | CO5300 | CST820 (CST816-compatible protocol) | TCA9554 reset; no AXP register writes |
+| `v2` | CO5300 | CST820 (CST816-compatible protocol) | TCA9554 reset + narrow AXP PWRKEY IRQ access; no V1 rail writes |
 
 Choose the revision before flashing. The images are not interchangeable. OTA checks the project name and `-v1`/`-v2` version suffix to prevent accidental cross-flashing.
 
@@ -19,11 +19,16 @@ Choose the revision before flashing. The images are not interchangeable. OTA che
 - Positions-only summary: open-position value, unrealized P/L, and today's realized P/L. The firmware does not request or display cash or unrelated account balances.
 - Open positions are taller, color-accented, and show an emphasized live price.
 - Tap an asset for an expanded OHLCV chart. Candle body width scales with volume; no separate volume histogram is used.
-- Entry and live-price guide lines, list sparklines, closed-today rows, and a battery/charge indicator.
+- Entry and live-price guide lines, subtle light-blue left-side chart levels, list sparklines, and closed-today rows.
+- A single top row with battery/charge state at left and bridge-local current time at right in 12-hour AM/PM format.
 - Dedicated 10 ms touch task so network requests and frame transfers do not drop taps.
-- **Short BOOT press:** toggle Prices / Positions (or leave a chart).
-- **BOOT hold 0.75-10 seconds:** display off/on.
-- **BOOT hold 10 seconds:** wake the display and arm local OTA for five minutes.
+- **Short POWER/PWRKEY press:** enter standby; a second POWER press wakes. The
+  panel, feed/touch workers, and Wi-Fi pause while RAM/UI state is retained.
+- **Short BOOT press:** activate the current blue bottom action (toggle Prices /
+  Positions, or leave a chart).
+- **BOOT release after 0.8 to under 10 seconds:** toggle privacy mode.
+- **BOOT hold continuously for 10 seconds:** arm local OTA for five minutes
+  without also toggling privacy.
 
 ## Security model
 
@@ -35,7 +40,10 @@ Choose the revision before flashing. The images are not interchangeable. OTA che
 - HTTPS uses the ESP-IDF certificate bundle. Plain HTTP is accepted only for RFC1918, link-local, loopback, CGNAT/tailnet, `.local`, `.lan`, `.home.arpa`, `.internal`, or single-label LAN hosts.
 - Feed bodies are capped at 192 KiB. Candle storage is capped at 36 per symbol; closed-today storage is capped at 20 rows.
 - The entire response is rejected unless `read_only` is the JSON boolean `true`. Missing, `false`, string, or numeric values fail closed and do not replace the last trusted state.
-- OTA requires physical presence plus a six-digit one-time code. It uses dual slots and ESP-IDF rollback, but it is not a substitute for Secure Boot. Production products should add signed images, Secure Boot, flash encryption, and token rotation.
+- Manual OTA requires physical presence plus a six-digit one-time code. V2 also checks the official latest-release endpoint in the background and accepts only a strictly newer stable V2 application whose SHA-256 is bound to a production-ready Ed25519-signed manifest. POWER standby takes an updater gate first, so Wi-Fi cannot be stopped during an authenticated inactive-slot write; manual-OTA arming likewise defers standby. Both update paths use dual slots and ESP-IDF rollback. This protects network updates, but it is not a substitute for hardware Secure Boot against a physical attacker.
+- Runtime AXP2101 writes on both boards are restricted to enabling and consuming
+  the physical PWRKEY short-press interrupt (`0x41` bit 3 and `0x49 = 0x08`).
+  V1-only rail sequencing remains compile-time isolated from V2.
 
 The NVS token is a revocable **bridge credential**, not a Coinbase credential. Never paste Coinbase API keys, API secrets, private keys, or session cookies into the portal.
 
@@ -81,16 +89,40 @@ The helper writes bootloader, partition table, initial OTA metadata, and the app
 
 ## First-boot onboarding
 
-1. Flash the correct V1 or V2 image and reboot.
-2. The AMOLED shows `FIRST-BOOT SETUP`, a unique `AMOLED-Terminal-xxxx` SSID, and its random WPA2 password.
-3. Join that Wi-Fi network and open `http://192.168.4.1` if the captive page does not appear automatically.
-4. Copy the generated UUID shown in the portal. Register/allowlist it in the local bridge and issue a unique, revocable bearer token for only that device.
-5. Enter Wi-Fi, the complete bridge feed URL, and that bridge-issued token. Do **not** enter exchange API credentials.
-6. Save. The device commits configuration to NVS, restarts, joins Wi-Fi, and begins polling.
+The consumer installer writes a short-lived setup session to the dedicated
+`onboarding` data partition over USB. That partition contains only loopback setup
+URLs, opaque session/authorization/CSRF values, the non-secret bridge feed URL,
+and an expiry. It never contains Coinbase JSON, a Coinbase key name or PEM, Wi-Fi,
+a device token, a MAC address, or personal infrastructure.
 
-If saved Wi-Fi cannot connect for 45 seconds, the protected setup AP returns while station retries continue. Leave the SSID blank in the portal to keep existing Wi-Fi; leave the token blank to keep an existing token.
+1. Flash the exact V1 or V2 image and USB onboarding partition, then reboot.
+2. The AMOLED shows `FIRST-BOOT SETUP`, a unique `AMOLED-Terminal-xxxx` SSID, and
+   its random WPA2 password.
+3. Join that Wi-Fi and open `http://192.168.4.1` if the captive page does not
+   appear automatically.
+4. Enter home Wi-Fi and choose or paste the Coinbase CDP ECDSA JSON. Portal
+   JavaScript sends the JSON directly to the authenticated localhost bridge; it
+   never posts it to the ESP `/save` handler.
+5. The bridge returns only a local feed URL, UUIDv4 device ID, and revocable
+   `cbat_` feed token. The browser posts those safe values plus Wi-Fi to `/save`.
+6. Firmware commits only those allowlisted fields to NVS, erases the one-time
+   onboarding partition, restarts, joins Wi-Fi, and begins polling.
 
-The logical onboarding fields are documented in [`config/runtime-config.schema.json`](config/runtime-config.schema.json). The device accepts them through the portal and does not read a JSON config file.
+The `/save` parser rejects unknown and duplicate fields, malformed percent
+encoding, oversized bodies and values, credential-like field names, and private
+key markers before changing NVS. If a captive mini-browser cannot contact
+localhost, it offers a same-computer fallback URL. The fallback does not make
+phone-only onboarding possible.
+
+If saved Wi-Fi cannot connect for 45 seconds, the protected setup AP returns while
+station retries continue. A source-built image without valid USB onboarding
+metadata retains the advanced manual portal: leave SSID or token blank only when
+intentionally keeping an existing value, and never enter Coinbase credentials in
+manual bridge fields.
+
+The logical persistent fields are documented in
+[`config/runtime-config.schema.json`](config/runtime-config.schema.json). The
+firmware accepts them through the portal and does not read a JSON config file.
 
 ## Local bridge contract
 
@@ -117,18 +149,29 @@ Compact candles use `[timestamp, open, high, low, close, volume]`. Object candle
 
 ## OTA
 
+### Automatic V2 updates
+
+After a randomized startup delay, V2 checks the official GitHub latest-release endpoint every six hours. It installs only when the release manifest and detached Ed25519 signature authenticate under the pinned release key, all production/control/V2-hardware readiness flags are true, the release is a strictly newer stable semantic version, and the downloaded V2 application matches the signed size, SHA-256, project, board suffix, and app version. Redirects are permitted only in this signed-download path; an altered payload cannot pass the pinned signature and digest checks. Failed checks or transfers leave the current slot selected, and ESP-IDF rollback remains enabled. POWER standby waits for the updater gate and stays awake rather than interrupting an active check/write.
+
+V1 does not compile or run the automatic updater. Prereleases and same/older versions are never installed automatically.
+
+### Manual recovery/update
+
 1. Build the image for the device revision.
-2. Hold BOOT for 10 seconds. The display wakes and shows a six-digit code for five minutes.
+2. While the display is awake, hold BOOT continuously for 10 seconds. The display shows a six-digit code for five minutes.
 3. Join the displayed setup AP, open `http://192.168.4.1`, choose `coinbase_amoled_terminal.bin`, and enter the code.
 4. The firmware verifies project identity, board suffix, size, and complete ESP-IDF image before selecting the inactive slot and restarting.
 
-A failed or interrupted upload leaves the running slot selected. Bootloader rollback remains enabled.
+A failed or interrupted upload leaves the running slot selected. Manual OTA remains available independently of automatic update checks.
 
 ## Factory reset
 
 ### From the protected portal
 
-Hold BOOT for 10 seconds, join the setup AP, open the portal, type `RESET` in the Factory reset section, and submit. This clears Wi-Fi, bridge URL/token, device UUID, and setup password, then restarts into onboarding. Firmware and OTA slots remain intact.
+Hold BOOT for 10 seconds, join the setup AP, open the portal, type `RESET` in
+the Factory reset section, and submit. This clears Wi-Fi, bridge URL/token,
+device UUID, setup password, and the dedicated one-time onboarding partition,
+then restarts. Firmware and OTA slots remain intact.
 
 ### From USB
 
@@ -136,7 +179,9 @@ Hold BOOT for 10 seconds, join the setup AP, open the portal, type `RESET` in th
 ./scripts/factory-reset.sh /dev/cu.usbmodemXXXX --confirm=RESET
 ```
 
-This erases only the NVS partition at `0x9000` (size `0x6000`). Reflashing without erasing NVS is not a factory reset.
+This erases only NVS at `0x9000` (size `0x6000`) and the onboarding partition at
+`0xE20000` (size `0x2000`). Reflashing without those explicit erases is not a
+factory reset.
 
 ## Host tests
 

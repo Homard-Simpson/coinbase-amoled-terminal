@@ -4,12 +4,16 @@ on:
   push:
     paths:
       - firmware/**
+      - installer/firmware_installer.py
       - scripts/build-firmware.sh
+      - scripts/scan-release-artifacts.py
       - .github/workflows/firmware.yml
   pull_request:
     paths:
       - firmware/**
+      - installer/firmware_installer.py
       - scripts/build-firmware.sh
+      - scripts/scan-release-artifacts.py
       - .github/workflows/firmware.yml
   workflow_dispatch:
 
@@ -20,9 +24,27 @@ concurrency:
   group: firmware-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  ESP_IDF_VERSION: "5.5.2"
+  ESP_IDF_CONTAINER: >-
+    espressif/idf:v5.5.2@sha256:05cbfc42ed2e987b8026722c15bf1d8523d3e4fd1b4ac04d2e4056f5e0918b99
+  FIRMWARE_RELEASE_VERSION: 0.0.0-ci
+
 jobs:
+  host-tests:
+    name: Firmware host contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run deterministic firmware host tests
+        run: ./firmware/tests/run.sh
+
   build:
     name: Build ${{ matrix.variant }}
+    needs: host-tests
     runs-on: ubuntu-latest
     timeout-minutes: 35
     strategy:
@@ -36,13 +58,31 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Build compile-only placeholder image
-        uses: espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5 # v1.2.0
-        with:
-          esp_idf_version: v5.5.2
-          target: esp32s3
-          path: .
-          command: ./scripts/build-firmware.sh ${{ matrix.variant }} --ci-placeholder
+      - name: Verify clean source and root-safe build entrypoint
+        run: |
+          test -z "$(git status --porcelain --untracked-files=normal)"
+          grep -F 'idf.py -C "$ROOT"' firmware/scripts/build.sh
+
+      - name: Build compile-only image in pinned ESP-IDF container
+        env:
+          BOARD_VARIANT: ${{ matrix.variant }}
+        run: |
+          docker run --rm \
+            --env "BOARD_VARIANT=$BOARD_VARIANT" \
+            --env "FIRMWARE_RELEASE_VERSION=$FIRMWARE_RELEASE_VERSION" \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --workdir /workspace \
+            "$ESP_IDF_CONTAINER" \
+            bash -lc './scripts/build-firmware.sh "$BOARD_VARIANT" --ci-placeholder'
+          test -z "$(git status --porcelain --untracked-files=normal)"
+
+      - name: Scan compiled binaries for release secrets
+        run: |
+          python3 scripts/scan-release-artifacts.py \
+            firmware/build/${{ matrix.variant }}/bootloader/bootloader.bin \
+            firmware/build/${{ matrix.variant }}/partition_table/partition-table.bin \
+            firmware/build/${{ matrix.variant }}/ota_data_initial.bin \
+            firmware/build/${{ matrix.variant }}/coinbase_amoled_terminal.bin
 
       - name: Upload compile-only artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

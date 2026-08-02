@@ -31,18 +31,25 @@ currently operate a paid bug-bounty program or promise a fixed response time.
 Changes must preserve these boundaries:
 
 1. **Coinbase credentials remain on the local bridge.** They must never be
-   compiled into firmware, returned by an endpoint, written to client logs, or
-   placed in a container image.
+   compiled into firmware, posted to the ESP setup portal, returned by an
+   endpoint, written to URLs/browser storage/client logs, or placed in an image.
 2. **The Coinbase credential is view-only.** Configure it without trade,
    transfer, withdrawal, or address-management permissions.
 3. **The ESP receives only a scoped feed token.** A feed token authenticates one
    device to the minimal display feed. It is not a Coinbase credential.
 4. **No trading surface exists.** The bridge must not implement order placement,
    cancellation, modification, transfer, or withdrawal routes.
-5. **Network exposure is private by default.** Bind to loopback and use a private
-   tailnet or an authenticated TLS reverse proxy for cross-host access.
-6. **Logs and errors are minimized.** Never log authorization headers, raw
-   Coinbase responses, credential files, feed tokens, or full portfolio payloads.
+5. **Network exposure stays private.** The standalone CLI binds to loopback. The
+   two-step installer explicitly opens the authenticated feed on the host's
+   trusted LAN so the display can pair; do not use that mode on an
+   untrusted network or expose it through router forwarding. Use a private
+   tailnet or an authenticated TLS reverse proxy for cross-network access.
+6. **Logs and errors are minimized.** Never log authorization headers, setup
+   submissions, raw Coinbase responses, credential files, Wi-Fi passwords, feed
+   tokens, or full portfolio payloads.
+7. **Local onboarding is one-time and loopback-only.** Expiring setup and CSRF
+   values, strict Origin/CORS/PNA checks, bounded bodies, and rollback must remain
+   mandatory. The browser never sends a Coinbase key to the ESP.
 
 Any pull request that weakens one of these invariants requires explicit security
 review and should normally be rejected.
@@ -54,7 +61,8 @@ review and should normally be rejected.
 - Use a unique random feed token per display and rotate it after loss or resale.
 - Keep the bridge and reverse proxy patched.
 - Terminate TLS before traffic leaves the bridge host.
-- Restrict inbound access by host firewall and private-network policy.
+- Restrict inbound access by host firewall and private-network policy; allow
+  installer port 8788 only from the trusted display LAN.
 - Avoid displaying sensitive values where shoulder surfing is possible.
 - Erase device NVS before transferring hardware to another person.
 - Review dependency and CodeQL alerts before each release.

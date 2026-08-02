@@ -5,6 +5,7 @@ import os
 import stat
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 from cryptography.hazmat.primitives import hashes
@@ -16,7 +17,13 @@ from coinbase_amoled_bridge.auth import (
     DeviceManager,
     DeviceRegistry,
     JWTSigner,
+    active_local_credential_slot,
+    compare_and_swap_local_credential_slot,
+    generate_device_id,
+    remove_local_credential_slot,
     save_local_credentials,
+    stage_local_credential_slot,
+    validate_device_id,
 )
 from coinbase_amoled_bridge.config import ConfigStore
 from coinbase_amoled_bridge.errors import CredentialError, ReadOnlyViolation
@@ -120,8 +127,61 @@ class JWTTests(unittest.TestCase):
                     },
                 )
 
+    def test_versioned_credential_slot_switch_is_scoped_and_atomic(self) -> None:
+        credentials, _ = make_credentials()
+        slot = "onboarding_txn_" + ("A" * 24) + ".bundle"
+        with tempfile.TemporaryDirectory() as temporary:
+            path = stage_local_credential_slot(
+                temporary,
+                credentials=credentials,
+                slot_name=slot,
+            )
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertIsNone(active_local_credential_slot(temporary))
+            self.assertTrue(
+                compare_and_swap_local_credential_slot(
+                    temporary,
+                    expected=None,
+                    replacement=slot,
+                )
+            )
+            self.assertEqual(active_local_credential_slot(temporary), slot)
+            self.assertEqual(
+                Credentials.load_local(temporary).key_name,
+                credentials.key_name,
+            )
+            self.assertFalse(
+                compare_and_swap_local_credential_slot(
+                    temporary,
+                    expected=None,
+                    replacement=slot,
+                )
+            )
+            with self.assertRaises(CredentialError):
+                remove_local_credential_slot(temporary, slot)
+            self.assertTrue(
+                compare_and_swap_local_credential_slot(
+                    temporary,
+                    expected=slot,
+                    replacement=None,
+                )
+            )
+            remove_local_credential_slot(temporary, slot)
+            self.assertFalse(path.exists())
+
 
 class DeviceAuthTests(unittest.TestCase):
+    def test_generated_device_id_is_lowercase_uuid4_and_opaque_ids_remain_valid(
+        self,
+    ) -> None:
+        generated = generate_device_id()
+        parsed = uuid.UUID(generated)
+        self.assertEqual(parsed.version, 4)
+        self.assertEqual(str(parsed), generated)
+        self.assertEqual(
+            validate_device_id("dev_existingOpaque_123"), "dev_existingOpaque_123"
+        )
+
     def test_device_token_is_hashed_at_rest_and_revocation_reloads(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             store = ConfigStore(temporary)

@@ -19,10 +19,10 @@ scan: ## Scan source and docs for secrets and private infrastructure.
 	$(PYTHON) scripts/scan_public_safety.py .
 
 lint: ## Run Ruff lint checks.
-	$(PYTHON) -m ruff check bridge scripts tests
+	$(PYTHON) -m ruff check bridge installer scripts tests
 
 format-check: ## Verify Python formatting without modifying files.
-	$(PYTHON) -m ruff format --check bridge scripts tests
+	$(PYTHON) -m ruff format --check bridge installer scripts tests
 
 test: ## Run the Python test suite.
 	$(PYTHON) -m pytest
@@ -32,7 +32,8 @@ audit: ## Audit development Python dependencies.
 
 shellcheck: ## Run ShellCheck on repository scripts.
 	@command -v shellcheck >/dev/null || { echo "shellcheck is required" >&2; exit 1; }
-	@find scripts -type f -name '*.sh' -print0 | xargs -0 shellcheck
+	@shellcheck install.sh
+	@find scripts installer -type f -name '*.sh' -print0 | xargs -0 shellcheck
 
 markdown: ## Lint Markdown with markdownlint-cli2.
 	@command -v markdownlint-cli2 >/dev/null || { echo "markdownlint-cli2 is required" >&2; exit 1; }

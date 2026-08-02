@@ -1,13 +1,110 @@
 # Coinbase AMOLED Terminal
 
-An unofficial, read-only Coinbase portfolio and market display for the Waveshare
-ESP32-S3 Touch AMOLED 1.8.
+Your Coinbase account, on a tiny screen. Your key stays on your computer. This
+display can't trade.
 
 > [!IMPORTANT]
 > This independent project is **not affiliated with, endorsed by, or sponsored by
 > Coinbase**. Coinbase and related marks belong to their respective owners. This
 > software is not financial advice and must not be used as a substitute for the
 > official Coinbase interfaces.
+
+> [!CAUTION]
+> Use a dedicated Coinbase CDP **view-only P-256 ECDSA** key. The installer rejects
+> keys with trade or transfer permission, but you should still verify permissions
+> in Coinbase before setup.
+
+## Step 1 — plug in and run one command
+
+Connect the **Waveshare ESP32-S3 Touch AMOLED 1.8** with a USB data cable. The
+release command installs the local read-only bridge, verifies the matching
+firmware, flashes only approved regions, and places a one-time setup session on
+the display. It runs as you. No `sudo`. No Docker.
+
+Run the version-pinned one-line installer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Homard-Simpson/coinbase-amoled-terminal/v2.0.0/install.sh | bash -s -- --version v2.0.0
+```
+
+The tag and firmware manifest are immutable and signed; the installer verifies
+release identity, board revision, every flashed region, and SHA-256 before writing.
+Reviewers can instead supply an explicit test manifest. That path requires the
+loud `--allow-unverified-test-artifacts` flag and is never presented as a
+production install.
+
+## Step 2 — join the display Wi-Fi
+
+Join the setup Wi-Fi shown on the display. Its captive portal asks for two things:
+
+1. your home Wi-Fi; and
+2. the Coinbase CDP **ECDSA** API-key JSON you downloaded.
+
+Press **Finish**. The page securely hands the Coinbase JSON straight to the
+localhost bridge on this same computer. It sends the display only Wi-Fi, a local
+feed address, a device ID, and a revocable read-only token.
+
+If an operating system's small captive window blocks localhost, the portal gives
+you one button to open the same setup on the computer. It is still the same two
+steps. This is a same-computer flow, not phone-only setup.
+
+Unsafe Coinbase keys are rejected. The key must be P-256 ECDSA and strictly
+view-only. A key that can trade or transfer is never saved.
+
+### What happens behind the scenes
+
+- The installer accepts exactly one USB serial device. It never identifies a
+  board from a port name, USB ID, chip model, flash size, or panel probing.
+- An existing official image may identify V1 or V2 only when its exact firmware
+  hash is present in the downloaded release manifest. Otherwise the installer
+  asks once for V1 or V2, with a clear hardware-identification link. No choice is
+  preselected; unattended ambiguity stops safely.
+- Every release artifact and flash region is declared in a versioned manifest and
+  verified with SHA-256 before writing. Unrelated NVS is preserved.
+- The one-time localhost session is short-lived, single-use, and authenticated.
+  It has no analytics, external assets, cookies, browser storage, or secret URLs.
+- The read-only bridge runs as your normal user through launchd or systemd.
+
+V1 and V2 firmware are not interchangeable. V1 performs power-controller setup
+that V2 must never receive. If you have a blank or DIY board, use Waveshare's
+[Version Options guide](https://www.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.8#Version_Options)
+before answering the one V1/V2 question. The installer fails closed rather than
+trying both.
+
+Safe local sample mode (no Coinbase account, credential, or flashing):
+
+```bash
+./install.sh --sample
+```
+
+Uninstall the app and service while keeping private setup data:
+
+```bash
+./install.sh --uninstall
+```
+
+Add `--purge` after `--uninstall` only when you also want to delete local
+credentials, configuration, and device tokens.
+
+### Updates, recovery, and reset
+
+- **Update:** rerun Step 1 with a newer approved version. Board and checksum
+  checks run again; saved NVS is preserved.
+- **Automatic V2 update:** V2 checks the official release channel in the
+  background and installs only a strictly newer stable V2 application whose
+  board identity, version, size, and SHA-256 are authenticated by the pinned
+  Ed25519 release key. V1 remains manual-update only.
+- **Physical controls:** POWER short press enters/wakes standby. BOOT short press
+  activates the blue bottom button, BOOT release after 0.8 to under 10 seconds
+  toggles privacy mode, and an uninterrupted 10-second BOOT hold arms manual OTA.
+- **Setup expired or interrupted:** reconnect USB and rerun the same command. New
+  local state is rolled back unless the display confirms its final save.
+- **Lost display:** revoke that display's token on the bridge. The Coinbase key
+  does not need to be copied to or recovered from the hardware.
+- **Factory reset:** hold BOOT for 10 seconds, join the protected display Wi-Fi,
+  and type `RESET` in the portal. This clears Wi-Fi, device identity/token, and
+  one-time setup metadata while leaving firmware installed. The USB recovery
+  helper erases those same two data partitions only.
 
 ## Actual interface
 
@@ -19,8 +116,8 @@ mockups. Account fields are hidden by the renderer's privacy mode.
 
 ![Production prices page showing five public markets](docs/images/prices-page.png)
 
-Five public markets with live prices, short-window direction, and tap targets for
-expanded charts.
+Five public markets with live prices, short-window direction, a consolidated
+battery/status/12-hour-time header, and tap targets for expanded charts.
 
 ### Positions in privacy mode
 
@@ -34,7 +131,8 @@ closed-position fields obfuscated before framebuffer output.
 ![Production BTC candle chart with Bollinger bands and support and resistance](docs/images/btc-chart-bb20-levels.png)
 
 Real hourly BTC-USD candles with volume-weighted body widths, BB20 upper/lower and
-middle bands, live-price marker, and public-data support/resistance levels.
+middle bands, live-price marker, muted left-axis prices, and public-data
+support/resistance levels.
 
 See [capture provenance](docs/INTERFACE_CAPTURE.md) for renderer source hashes,
 raw framebuffer checksums, the immutable public-data snapshot, and reproduction
@@ -42,10 +140,9 @@ steps.
 
 ## Status
 
-This is a public, pre-1.0 open-source release. Interfaces, provisioning steps,
-and firmware behavior may change, and there are no stable releases yet. The
-security-first defaults and read-only trading boundary remain release
-requirements, not optional examples.
+`v2.0.0` is the first stable public release. Interfaces and provisioning may
+continue to evolve, but the security-first defaults, dual-board hardware guards,
+and read-only trading boundary remain non-negotiable release requirements.
 
 ## Sustainable project model
 
@@ -65,6 +162,8 @@ endorsement. See [commercial licensing](COMMERCIAL-LICENSING.md).
 - Shows selected public market prices, compact history, and read-only portfolio
   data on a 368 × 448 AMOLED display.
 - Supports the Waveshare ESP32-S3 Touch AMOLED 1.8 V1 and V2 hardware revisions.
+- Preserves the same POWER standby/wake and BOOT action/privacy/manual-OTA
+  controls on both board revisions.
 - Keeps Coinbase API credentials on a bridge you control.
 - Gives the display only a separate, scoped device-feed token.
 - Supports local-network or private-tailnet deployments by default.
@@ -112,12 +211,14 @@ flashing. Details: [Hardware compatibility](docs/HARDWARE_COMPATIBILITY.md).
 ## Repository layout
 
 ```text
-bridge/    Local read-only feed service; owns Coinbase credentials
-firmware/  ESP-IDF application for V1 and V2 boards
-docs/      Architecture, setup, security, and release documentation
-scripts/   Public-safety checks, CI helpers, and the one-command preflight
-tests/     Repository and scanner tests
-.github/   CI, dependency updates, and contribution templates
+install.sh  Two-step per-user installer entry point
+installer/  Fixed launchd/systemd templates and safe renderer
+bridge/     Local read-only feed service; owns Coinbase credentials
+firmware/   ESP-IDF application for V1 and V2 boards
+docs/       Architecture, setup, security, and release documentation
+scripts/    Public-safety checks, CI helpers, and the one-command preflight
+tests/      Repository, installer, and scanner tests
+.github/    CI, dependency updates, and contribution templates
 ```
 
 ## Documentation
@@ -136,7 +237,10 @@ tests/     Repository and scanner tests
 - [Contributor License Agreement](CONTRIBUTOR_LICENSE_AGREEMENT.md)
 - [Trademark policy](TRADEMARKS.md)
 
-## Quick start
+## Advanced source/developer setup
+
+Use this section when building firmware from source, developing the bridge, or
+configuring private HTTPS/tailnet ingress manually.
 
 ### 1. Review the boundaries
 
@@ -192,10 +296,12 @@ With ESP-IDF exported in the current shell:
 ./scripts/build-firmware.sh v2
 ```
 
-No secrets are compiled in. The device is onboarded at runtime through its
-captive portal, where you enter Wi-Fi, the bridge feed URL, the device ID, and
-the per-device bearer token; all are stored in NVS. CI builds both variants as
-compile proofs only; do not flash CI artifacts as configured releases.
+No secrets are compiled in. During the installer flow, the captive portal accepts
+home Wi-Fi and sends the Coinbase JSON directly to the authenticated localhost
+endpoint. The ESP receives only Wi-Fi, the bridge feed URL, a UUIDv4 device ID,
+and the per-device bearer token; those device-safe values are stored in NVS. CI
+builds both variants as compile proofs only; do not flash CI artifacts as
+configured releases.
 
 ### 6. Run the complete preflight
 

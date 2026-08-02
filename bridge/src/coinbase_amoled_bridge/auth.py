@@ -11,10 +11,13 @@ import json
 import os
 import re
 import secrets
+import struct
 import tempfile
 import threading
 import time
-from collections.abc import Mapping
+import uuid
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -27,12 +30,23 @@ from .config import ConfigStore
 from .errors import ConfigError, CredentialError, ReadOnlyViolation
 from .util import ensure_private_directory, iso_z, safe_text
 
+try:  # POSIX in production (Linux/macOS); guarded for import-time portability.
+    import fcntl
+except ImportError:  # pragma: no cover - Windows is not a supported deployment.
+    fcntl = None  # type: ignore[assignment]
+
 KEY_NAME_ENV = "COINBASE_API_KEY_NAME"
 PRIVATE_KEY_ENV = "COINBASE_API_PRIVATE_KEY"
 KEY_NAME_FILE_ENV = "COINBASE_API_KEY_NAME_FILE"
 PRIVATE_KEY_FILE_ENV = "COINBASE_API_PRIVATE_KEY_FILE"
 MAX_KEY_NAME_BYTES = 2_048
 MAX_PRIVATE_KEY_BYTES = 65_536
+MAX_CREDENTIAL_BUNDLE_BYTES = MAX_KEY_NAME_BYTES + MAX_PRIVATE_KEY_BYTES + 64
+CREDENTIAL_BUNDLE_MAGIC = b"CBATCRD1"
+CREDENTIAL_BUNDLE_FILE = "coinbase_credentials"
+ACTIVE_CREDENTIAL_SLOT_FILE = "coinbase_credentials.active"
+CREDENTIAL_SLOT_DIRECTORY = "credential-slots"
+CREDENTIAL_SLOT_RE = re.compile(r"^onboarding_[A-Za-z0-9_-]{20,80}\.bundle$")
 DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{11,63}$")
 DEVICE_TOKEN_RE = re.compile(r"^cbat_[A-Za-z0-9_-]{43}$")
 DUMMY_TOKEN_DIGEST = hashlib.sha256(b"bridge-auth-dummy-value").hexdigest()
@@ -45,6 +59,31 @@ class Credentials:
     source: str
 
     @classmethod
+    def from_values(
+        cls, *, key_name: str, private_key_pem: bytes, source: str
+    ) -> Credentials:
+        clean_name = key_name.strip()
+        if (
+            not clean_name
+            or len(clean_name.encode("utf-8")) > MAX_KEY_NAME_BYTES
+            or any(ord(ch) < 0x20 or ch.isspace() for ch in clean_name)
+        ):
+            raise CredentialError("API key name is invalid")
+        normalized_private_key = private_key_pem.strip() + b"\n"
+        JWTSigner._load_private_key(normalized_private_key)
+        return cls(
+            key_name=clean_name,
+            private_key_pem=normalized_private_key,
+            source=source,
+        )
+
+    @classmethod
+    def load_local(cls, data_dir: str | os.PathLike[str]) -> Credentials:
+        data_path = Path(data_dir).expanduser().resolve()
+        with local_credential_lock(data_path, exclusive=False):
+            return _load_local_credentials_unlocked(data_path)
+
+    @classmethod
     def load(
         cls,
         data_dir: str | os.PathLike[str],
@@ -55,6 +94,8 @@ class Credentials:
         data_path = Path(data_dir).expanduser().resolve()
         local_key_name = data_path / "secrets" / "coinbase_api_key_name"
         local_private_key = data_path / "secrets" / "coinbase_api_private_key"
+        local_bundle = data_path / "secrets" / CREDENTIAL_BUNDLE_FILE
+        local_active = data_path / "secrets" / ACTIVE_CREDENTIAL_SLOT_FILE
         docker_key_name = Path("/run/secrets/coinbase_api_key_name")
         docker_private_key = Path("/run/secrets/coinbase_api_private_key")
 
@@ -88,6 +129,9 @@ class Credentials:
                 docker_private_key, MAX_PRIVATE_KEY_BYTES
             )
             source = "docker_secrets"
+        elif local_active.exists() or local_bundle.is_file():
+            with local_credential_lock(data_path, exclusive=False):
+                return _load_local_credentials_unlocked(data_path)
         elif local_key_name.is_file() and local_private_key.is_file():
             key_name_bytes = _read_secret_file(local_key_name, MAX_KEY_NAME_BYTES)
             private_key_bytes = _read_secret_file(
@@ -101,20 +145,15 @@ class Credentials:
             )
 
         try:
-            key_name = key_name_bytes.decode("utf-8").strip()
+            key_name = key_name_bytes.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise CredentialError("API key name must be UTF-8") from exc
-        if not key_name or len(key_name.encode("utf-8")) > MAX_KEY_NAME_BYTES:
-            raise CredentialError("API key name is empty or too long")
-        if any(ord(ch) < 0x20 or ch.isspace() for ch in key_name):
-            raise CredentialError(
-                "API key name contains whitespace or control characters"
-            )
-
-        private_key_bytes = private_key_bytes.strip() + b"\n"
         # Parse immediately so bad material fails before the server can bind.
-        JWTSigner._load_private_key(private_key_bytes)
-        return cls(key_name=key_name, private_key_pem=private_key_bytes, source=source)
+        return cls.from_values(
+            key_name=key_name,
+            private_key_pem=private_key_bytes,
+            source=source,
+        )
 
 
 def _read_secret_file(path: Path, maximum_bytes: int) -> bytes:
@@ -132,6 +171,228 @@ def _read_secret_file(path: Path, maximum_bytes: int) -> bytes:
     if b"\x00" in payload:
         raise CredentialError("credential secret file contains NUL bytes")
     return payload
+
+
+def _encode_credential_bundle(credentials: Credentials) -> bytes:
+    """Encode both credential values into one atomically replaceable file."""
+
+    name = credentials.key_name.encode("utf-8")
+    private_key = credentials.private_key_pem
+    return (
+        CREDENTIAL_BUNDLE_MAGIC
+        + struct.pack(">II", len(name), len(private_key))
+        + name
+        + private_key
+    )
+
+
+def _read_credential_bundle(path: Path) -> Credentials:
+    try:
+        if (
+            not path.is_file()
+            or not 1 <= path.stat().st_size <= MAX_CREDENTIAL_BUNDLE_BYTES
+        ):
+            raise CredentialError("local credential bundle is invalid")
+        payload = path.read_bytes()
+    except CredentialError:
+        raise
+    except OSError as exc:
+        raise CredentialError("local credential bundle is invalid") from exc
+    header_size = len(CREDENTIAL_BUNDLE_MAGIC) + 8
+    if len(payload) < header_size or not payload.startswith(CREDENTIAL_BUNDLE_MAGIC):
+        raise CredentialError("local credential bundle is invalid")
+    name_length, key_length = struct.unpack(
+        ">II", payload[len(CREDENTIAL_BUNDLE_MAGIC) : header_size]
+    )
+    if (
+        name_length < 1
+        or name_length > MAX_KEY_NAME_BYTES
+        or key_length < 1
+        or key_length > MAX_PRIVATE_KEY_BYTES
+        or header_size + name_length + key_length != len(payload)
+    ):
+        raise CredentialError("local credential bundle is invalid")
+    try:
+        key_name = payload[header_size : header_size + name_length].decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CredentialError("local credential bundle is invalid") from exc
+    private_key = payload[header_size + name_length :]
+    return Credentials.from_values(
+        key_name=key_name,
+        private_key_pem=private_key,
+        source="local_setup",
+    )
+
+
+def _fsync_directory(path: Path) -> None:
+    try:
+        directory_fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError:
+        # Some filesystems do not permit directory fsync. File fsync plus atomic
+        # rename is still the strongest portable fallback available here.
+        pass
+
+
+@contextmanager
+def local_credential_lock(
+    data_dir: str | os.PathLike[str], *, exclusive: bool
+) -> Iterator[None]:
+    """Serialize local credential pointer and file mutations across processes."""
+
+    data_path = Path(data_dir).expanduser().resolve()
+    ensure_private_directory(data_path)
+    descriptor = os.open(data_path / ".credentials.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        if fcntl is not None:
+            operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+            fcntl.flock(descriptor, operation)
+        yield
+    finally:
+        if fcntl is not None:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _active_credential_slot_unlocked(data_path: Path) -> str | None:
+    pointer = data_path / "secrets" / ACTIVE_CREDENTIAL_SLOT_FILE
+    if not pointer.exists():
+        return None
+    try:
+        payload = _read_secret_file(pointer, 160)
+        value = payload.decode("ascii").strip()
+    except UnicodeDecodeError as exc:
+        raise CredentialError("local credential selector is invalid") from exc
+    if not CREDENTIAL_SLOT_RE.fullmatch(value):
+        raise CredentialError("local credential selector is invalid")
+    slot = data_path / "secrets" / CREDENTIAL_SLOT_DIRECTORY / value
+    if not slot.is_file():
+        raise CredentialError("selected local credential bundle is missing")
+    return value
+
+
+def active_local_credential_slot(data_dir: str | os.PathLike[str]) -> str | None:
+    data_path = Path(data_dir).expanduser().resolve()
+    with local_credential_lock(data_path, exclusive=False):
+        return _active_credential_slot_unlocked(data_path)
+
+
+def _load_local_credentials_unlocked(data_path: Path) -> Credentials:
+    active = _active_credential_slot_unlocked(data_path)
+    if active is not None:
+        return _read_credential_bundle(
+            data_path / "secrets" / CREDENTIAL_SLOT_DIRECTORY / active
+        )
+    bundle_path = data_path / "secrets" / CREDENTIAL_BUNDLE_FILE
+    if bundle_path.is_file():
+        return _read_credential_bundle(bundle_path)
+    key_name_bytes = _read_secret_file(
+        data_path / "secrets" / "coinbase_api_key_name", MAX_KEY_NAME_BYTES
+    )
+    private_key_bytes = _read_secret_file(
+        data_path / "secrets" / "coinbase_api_private_key",
+        MAX_PRIVATE_KEY_BYTES,
+    )
+    try:
+        key_name = key_name_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CredentialError("API key name must be UTF-8") from exc
+    return Credentials.from_values(
+        key_name=key_name,
+        private_key_pem=private_key_bytes,
+        source="local_setup",
+    )
+
+
+def stage_local_credential_slot(
+    data_dir: str | os.PathLike[str],
+    *,
+    credentials: Credentials,
+    slot_name: str,
+) -> Path:
+    """Write an inactive, owner-only credential version for onboarding."""
+
+    if not CREDENTIAL_SLOT_RE.fullmatch(slot_name):
+        raise CredentialError("local credential slot name is invalid")
+    validated = Credentials.from_values(
+        key_name=credentials.key_name,
+        private_key_pem=credentials.private_key_pem,
+        source="local_setup",
+    )
+    data_path = Path(data_dir).expanduser().resolve()
+    destination = data_path / "secrets" / CREDENTIAL_SLOT_DIRECTORY / slot_name
+    with local_credential_lock(data_path, exclusive=True):
+        write_secret_atomic(destination, _encode_credential_bundle(validated))
+    return destination
+
+
+def load_local_credential_slot(
+    data_dir: str | os.PathLike[str], slot_name: str
+) -> Credentials:
+    if not CREDENTIAL_SLOT_RE.fullmatch(slot_name):
+        raise CredentialError("local credential slot name is invalid")
+    data_path = Path(data_dir).expanduser().resolve()
+    with local_credential_lock(data_path, exclusive=False):
+        return _read_credential_bundle(
+            data_path / "secrets" / CREDENTIAL_SLOT_DIRECTORY / slot_name
+        )
+
+
+def compare_and_swap_local_credential_slot(
+    data_dir: str | os.PathLike[str],
+    *,
+    expected: str | None,
+    replacement: str | None,
+) -> bool:
+    """Atomically change only the active local credential selector."""
+
+    for value in (expected, replacement):
+        if value is not None and not CREDENTIAL_SLOT_RE.fullmatch(value):
+            raise CredentialError("local credential slot name is invalid")
+    data_path = Path(data_dir).expanduser().resolve()
+    pointer = data_path / "secrets" / ACTIVE_CREDENTIAL_SLOT_FILE
+    with local_credential_lock(data_path, exclusive=True):
+        current = _active_credential_slot_unlocked(data_path)
+        if current != expected:
+            return False
+        if replacement is None:
+            pointer.unlink(missing_ok=True)
+            if pointer.parent.exists():
+                _fsync_directory(pointer.parent)
+        else:
+            slot = data_path / "secrets" / CREDENTIAL_SLOT_DIRECTORY / replacement
+            if not slot.is_file():
+                raise CredentialError("replacement local credential bundle is missing")
+            write_secret_atomic(
+                pointer,
+                (replacement + "\n").encode("ascii"),
+                replace=pointer.exists(),
+            )
+        return True
+
+
+def remove_local_credential_slot(
+    data_dir: str | os.PathLike[str], slot_name: str
+) -> None:
+    """Remove an inactive staged slot without disturbing any active version."""
+
+    if not CREDENTIAL_SLOT_RE.fullmatch(slot_name):
+        raise CredentialError("local credential slot name is invalid")
+    data_path = Path(data_dir).expanduser().resolve()
+    slot = data_path / "secrets" / CREDENTIAL_SLOT_DIRECTORY / slot_name
+    with local_credential_lock(data_path, exclusive=True):
+        if _active_credential_slot_unlocked(data_path) == slot_name:
+            raise CredentialError("cannot remove the active local credential bundle")
+        slot.unlink(missing_ok=True)
+        if slot.parent.exists():
+            _fsync_directory(slot.parent)
+        try:
+            slot.parent.rmdir()
+        except OSError:
+            pass
 
 
 def _b64url(payload: bytes) -> str:
@@ -204,7 +465,9 @@ class JWTSigner:
 
 
 def generate_device_id() -> str:
-    return "dev_" + secrets.token_urlsafe(18)
+    """Generate the lowercase UUIDv4 identity required by device firmware."""
+
+    return str(uuid.uuid4())
 
 
 def validate_device_id(device_id: str) -> str:
@@ -246,6 +509,7 @@ def write_secret_atomic(path: Path, payload: bytes, *, replace: bool = False) ->
             os.chmod(path, 0o600)
         except OSError:
             pass
+        _fsync_directory(path.parent)
     except BaseException:
         try:
             temporary.unlink(missing_ok=True)
@@ -293,6 +557,7 @@ class DeviceManager:
         device_id: str | None = None,
         label: str = "",
         token_path: str | os.PathLike[str] | None = None,
+        token: str | None = None,
     ) -> DeviceProvision:
         candidate = validate_device_id(device_id or generate_device_id())
         try:
@@ -305,8 +570,10 @@ class DeviceManager:
             else self._default_token_path(candidate)
         )
         self._validate_token_destination(destination)
-        token = generate_device_token()
-        digest = token_digest(token)
+        issued_token = generate_device_token() if token is None else token
+        if not DEVICE_TOKEN_RE.fullmatch(issued_token):
+            raise CredentialError("device token is invalid")
+        digest = token_digest(issued_token)
         if destination.exists():
             raise CredentialError("device token destination already exists")
 
@@ -326,7 +593,7 @@ class DeviceManager:
 
         # The token is written first; on config failure it is removed. The raw
         # token is never returned or printed by this API.
-        write_secret_atomic(destination, (token + "\n").encode("ascii"))
+        write_secret_atomic(destination, (issued_token + "\n").encode("ascii"))
         try:
             self.store.update(mutate)
         except BaseException:
@@ -336,7 +603,7 @@ class DeviceManager:
                 pass
             raise
         finally:
-            token = ""  # Minimize lifetime; Python does not promise zeroization.
+            issued_token = ""  # Python does not promise zeroization.
         return DeviceProvision(device_id=candidate, token_path=destination)
 
     def rotate(
@@ -484,40 +751,80 @@ def save_local_credentials(
 ) -> tuple[Path, Path]:
     """Validate and store local setup credentials as private files."""
 
-    key_name = key_name.strip()
-    if (
-        not key_name
-        or len(key_name.encode("utf-8")) > MAX_KEY_NAME_BYTES
-        or any(ord(ch) < 0x20 or ch.isspace() for ch in key_name)
-    ):
-        raise CredentialError("API key name is invalid")
-    normalized_private_key = private_key_pem.strip() + b"\n"
-    JWTSigner._load_private_key(normalized_private_key)
+    validated = Credentials.from_values(
+        key_name=key_name,
+        private_key_pem=private_key_pem,
+        source="local_setup",
+    )
+    key_name = validated.key_name
+    normalized_private_key = validated.private_key_pem
     secrets_dir = Path(data_dir).expanduser().resolve() / "secrets"
     key_name_path = secrets_dir / "coinbase_api_key_name"
     private_key_path = secrets_dir / "coinbase_api_private_key"
-    old_key_name = (
-        _read_secret_file(key_name_path, MAX_KEY_NAME_BYTES)
-        if key_name_path.is_file()
-        else None
-    )
-    write_secret_atomic(
-        key_name_path, (key_name + "\n").encode("utf-8"), replace=replace
-    )
-    try:
-        write_secret_atomic(private_key_path, normalized_private_key, replace=replace)
-    except BaseException:
+    data_path = Path(data_dir).expanduser().resolve()
+    with local_credential_lock(data_path, exclusive=True):
+        old_key_name = (
+            _read_secret_file(key_name_path, MAX_KEY_NAME_BYTES)
+            if key_name_path.is_file()
+            else None
+        )
+        write_secret_atomic(
+            key_name_path, (key_name + "\n").encode("utf-8"), replace=replace
+        )
         try:
-            if old_key_name is None:
-                key_name_path.unlink(missing_ok=True)
-            else:
-                write_secret_atomic(key_name_path, old_key_name, replace=True)
-        except (OSError, CredentialError) as rollback_error:
-            raise CredentialError(
-                "credential update failed and the prior key name could not be restored"
-            ) from rollback_error
-        raise
+            write_secret_atomic(
+                private_key_path, normalized_private_key, replace=replace
+            )
+            active_pointer = secrets_dir / ACTIVE_CREDENTIAL_SLOT_FILE
+            active_pointer.unlink(missing_ok=True)
+            _fsync_directory(secrets_dir)
+        except BaseException:
+            try:
+                if old_key_name is None:
+                    key_name_path.unlink(missing_ok=True)
+                else:
+                    write_secret_atomic(key_name_path, old_key_name, replace=True)
+            except (OSError, CredentialError) as rollback_error:
+                raise CredentialError(
+                    "credential update failed and the prior key name could not "
+                    "be restored"
+                ) from rollback_error
+            raise
     return key_name_path, private_key_path
+
+
+def save_local_credentials_atomic(
+    data_dir: str | os.PathLike[str],
+    *,
+    credentials: Credentials,
+    replace: bool = False,
+) -> Path:
+    """Store key name and PEM in one atomic, owner-only credential bundle.
+
+    The web onboarding path uses this format so another process can never observe
+    a new key name paired with an old PEM (or the reverse). Legacy two-file local
+    credentials remain readable for existing installations.
+    """
+
+    validated = Credentials.from_values(
+        key_name=credentials.key_name,
+        private_key_pem=credentials.private_key_pem,
+        source="local_setup",
+    )
+    destination = (
+        Path(data_dir).expanduser().resolve() / "secrets" / CREDENTIAL_BUNDLE_FILE
+    )
+    data_path = Path(data_dir).expanduser().resolve()
+    with local_credential_lock(data_path, exclusive=True):
+        write_secret_atomic(
+            destination,
+            _encode_credential_bundle(validated),
+            replace=replace,
+        )
+        active_pointer = destination.parent / ACTIVE_CREDENTIAL_SLOT_FILE
+        active_pointer.unlink(missing_ok=True)
+        _fsync_directory(destination.parent)
+    return destination
 
 
 def prompt_key_name() -> str:

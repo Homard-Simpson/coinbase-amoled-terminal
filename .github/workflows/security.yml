@@ -28,8 +28,10 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Scan publishable source
-        run: python scripts/scan_public_safety.py .
+      - name: Scan publishable source, installer, and service templates
+        run: |
+          python scripts/scan_public_safety.py .
+          python scripts/scan_public_safety.py install.sh installer
 
   gitleaks:
     name: Gitleaks history scan

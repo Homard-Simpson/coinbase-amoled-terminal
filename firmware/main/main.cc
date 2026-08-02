@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <string>
 #include <utility>
 #include <vector>
@@ -39,15 +40,25 @@
 #include "esp_io_expander.h"
 #include "esp_io_expander_tca9554.h"
 #include "esp_ota_ops.h"
+#include "esp_sleep.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "network_portal.h"
+#include "onboarding_metadata.h"
 #include "runtime_config.h"
+#if !BOARD_IS_V1
+#include "auto_ota_v2.h"
+#endif
+#include "bollinger_bands.h"
+#include "control_policy.h"
+#include "key_levels.h"
+#include "ui_helpers.h"
 
 #define PROGMEM
 #include "glcdfont.h"
@@ -76,16 +87,21 @@ static bool detail=false;
 static int selected_chart=-1;
 static uint32_t feed_refresh_seconds=30,history_sample_seconds=30,candle_interval_seconds=0;
 static uint64_t last_ok_ms=0;
+static std::string display_time="--:-- --";
 static int px_row_y[5],px_row_h[5],px_row_asset[5],px_row_n=0;
 // Feed state is produced by a dedicated network task and consumed by the UI loop.
 // Heavy shared state is guarded by state_mux; status and event latches are atomic.
 enum { ST_STARTING=0, ST_UPDATED, ST_NOWIFI, ST_UNCONFIGURED, ST_HTTPERR,
-       ST_JSONERR, ST_TOO_LARGE, ST_UNSAFE };
+       ST_JSONERR, ST_TOO_LARGE, ST_UNSAFE, ST_PENDING_NETWORK,
+       ST_PENDING_CHECK, ST_PENDING_READY, ST_PENDING_REJECTED };
 static std::atomic_int feed_status{ST_STARTING},feed_http_code{0};
 static std::atomic_bool data_dirty{true};
 static SemaphoreHandle_t state_mux=nullptr;
+static EventGroupHandle_t standby_events=nullptr;
+static constexpr EventBits_t STANDBY_REQUEST=BIT0, FEED_IDLE=BIT1, TOUCH_IDLE=BIT2;
 static std::atomic_int tap_x{-1},tap_y{-1};
-static bool screen_on=true;                // BOOT long-press display toggle; no auto-timeout
+static bool screen_on=true;
+static bool privacy_mode=false;            // volatile by design; every boot starts visible
 struct Position { bool open=false; std::string side="-"; double size=0,entry=0,pnl=0; };
 struct ClosedPosition { std::string symbol="-",side="-"; double size=0,pnl=0; };
 struct Candle { int64_t timestamp=0; double open=0,high=0,low=0,close=0,volume=0; };
@@ -93,20 +109,21 @@ struct Asset {
   const char *name; double price=0; Position pos;
   double history[HISTORY_SAMPLES]={}; uint8_t history_count=0,history_head=0;
   Candle candles[CANDLE_SAMPLES]={}; uint8_t candle_count=0;
+  KeyLevels key_levels;
   explicit Asset(const char*n):name(n){}
 };
 static Asset assets[]={Asset("BTC"),Asset("SOL"),Asset("XLM"),Asset("HYPE"),Asset("ETH")};
 static std::vector<ClosedPosition> closed_today;
 static double position_value=0, total_pnl=0, realized_pnl_today=0;
-// AXP2101 PMU battery/power state. Read-only over i2c (address 0x34); never write on
-// V2 — PMU writes blank the CO5300 panel. Register semantics match the proven
-// AXP2101 register semantics: level=0xA4, charge direction=0x01[6:5], done=0x01[2:0]==4.
+// AXP2101 PMU battery/power state. Runtime writes are restricted to PWRKEY IRQ
+// enable/status registers 0x41/0x49; V1-only rail writes stay in panel_power_reset().
+// Register semantics: level=0xA4, charge direction=0x01[6:5], done=0x01[2:0]==4.
 struct Battery { bool present=false; int level=0; bool charging=false, done=false, vbus=false; };
 static Battery g_batt;
 static i2c_master_dev_handle_t axp_read_dev=nullptr;
 
 static uint16_t rgb(uint8_t r,uint8_t g,uint8_t b){ return __builtin_bswap16(((r&0xF8)<<8)|((g&0xFC)<<3)|(b>>3)); }
-static const uint16_t BLACK=rgb(5,8,15),CARD=rgb(18,24,38),GRID=rgb(45,57,78),MUTED=rgb(190,198,214),WHITE=rgb(245,247,250),GREEN=rgb(48,209,88),RED=rgb(255,69,58),BLUE=rgb(55,126,255),AMBER=rgb(255,180,0);
+static const uint16_t BLACK=rgb(5,8,15),CARD=rgb(18,24,38),GRID=rgb(45,57,78),MUTED=rgb(190,198,214),WHITE=rgb(245,247,250),GREEN=rgb(48,209,88),RED=rgb(255,69,58),BLUE=rgb(55,126,255),AMBER=rgb(255,180,0),BB_UPPER=rgb(55,220,255),BB_LOWER=rgb(180,105,255),BB_MIDDLE=rgb(105,125,155),AXIS_BLUE=rgb(125,175,210);
 static void rect(int x,int y,int w,int h,uint16_t c){ x=std::max(0,x); y=std::max(0,y); w=std::min(w,W-x); h=std::min(h,H-y); for(int yy=y;yy<y+h;yy++) std::fill(fb+yy*W+x,fb+yy*W+x+w,c); }
 static int text_width(const char*s,int scale=2){ scale=std::max(2,scale); return (int)strlen(s)*6*scale; }
 static void text(int x,int y,const char*s,uint16_t c,int scale=2){ scale=std::max(2,scale); for(;*s;s++,x+=6*scale){ unsigned ch=(unsigned char)*s; if(ch<32||ch>127) ch='?'; for(int i=0;i<5;i++){ uint8_t col=font[ch*5+i]; for(int j=0;j<8;j++) if(col&(1<<j)) rect(x+i*scale,y+j*scale,scale,scale,c); } } }
@@ -115,10 +132,22 @@ static void text_center(int left,int width,int y,const char*s,uint16_t c,int sca
 static void text_bold(int x,int y,const char*s,uint16_t c,int scale=2){ text(x,y,s,c,scale); text(x+1,y,s,c,scale); }
 static void to_upper(char*s){ for(;*s;s++) if(*s>='a'&&*s<='z') *s=(char)(*s-'a'+'A'); }
 static void fmt_money(char *b,size_t n,double v){ double a=fabs(v); if(a>=10000) snprintf(b,n,"$%.0f",v); else if(a>=100) snprintf(b,n,"$%.2f",v); else if(a>=1) snprintf(b,n,"$%.3f",v); else snprintf(b,n,"$%.5f",v); }
+static void fmt_entry_money(char *b,size_t n,double v){ double a=fabs(v); if(a>=100) snprintf(b,n,"$%.2f",v); else if(a>=1) snprintf(b,n,"$%.3f",v); else snprintf(b,n,"$%.5f",v); }
+static void draw_key_level_row(const Asset&a,int left,int right,int y){
+  char price[24],label[28]; double support=0,resistance=0;
+  nearest_key_levels(a.key_levels,a.price,support,resistance);
+  if(support>0){fmt_money(price,sizeof(price),support);snprintf(label,sizeof(label),"S %s",price);text(left,y,label,GREEN,2);}
+  else text(left,y,"S --",MUTED,2);
+  if(resistance>0){fmt_money(price,sizeof(price),resistance);snprintf(label,sizeof(label),"R %s",price);text_right(right,y,label,RED,2);}
+  else text_right(right,y,"R --",MUTED,2);
+}
 static void pixel(int x,int y,uint16_t c){ if(x>=0&&x<W&&y>=0&&y<H)fb[y*W+x]=c; }
 static void draw_line(int x0,int y0,int x1,int y1,uint16_t c,int thickness=1){
   int dx=abs(x1-x0),sx=x0<x1?1:-1,dy=-abs(y1-y0),sy=y0<y1?1:-1,err=dx+dy;
   while(true){ for(int yy=0;yy<thickness;yy++)pixel(x0,y0+yy,c); if(x0==x1&&y0==y1)break; int e2=2*err; if(e2>=dy){err+=dy;x0+=sx;} if(e2<=dx){err+=dx;y0+=sy;} }
+}
+static bool valid_display_time(const char*value){
+  return value&&strlen(value)==8&&value[0]>='0'&&value[0]<='1'&&value[1]>='0'&&value[1]<='9'&&value[2]==':'&&value[3]>='0'&&value[3]<='5'&&value[4]>='0'&&value[4]<='9'&&value[5]==' '&&((value[6]=='A'||value[6]=='P')&&value[7]=='M')&&!(value[0]=='0'&&value[1]=='0')&&!(value[0]=='1'&&value[1]>'2');
 }
 static double num(cJSON*o,const char*k){cJSON*x=cJSON_GetObjectItemCaseSensitive(o,k);double v=cJSON_IsNumber(x)?x->valuedouble:0;return std::isfinite(v)&&fabs(v)<=1e15?v:0;}
 static double history_at(const Asset&a,int i){ int start=(a.history_head+HISTORY_SAMPLES-a.history_count)%HISTORY_SAMPLES; return a.history[(start+i)%HISTORY_SAMPLES]; }
@@ -197,23 +226,31 @@ static bool load_candles(Asset&a,cJSON*root){
   }
   return a.candle_count>0;
 }
+static void load_key_levels(Asset&a,cJSON*root){
+  clear_key_levels(a.key_levels);
+  if(!cJSON_IsObject(root))return;
+  cJSON*series=cJSON_GetObjectItemCaseSensitive(root,a.name);
+  if(!cJSON_IsArray(series))return;
+  cJSON*item=nullptr;
+  cJSON_ArrayForEach(item,series)if(cJSON_IsNumber(item))add_key_level(a.key_levels,item->valuedouble);
+}
 static bool candle_bounds(const Asset&a,double&lo,double&hi,double&max_volume){
   if(!a.candle_count)return false;
   lo=a.candles[0].low; hi=a.candles[0].high; max_volume=0;
   for(int i=0;i<a.candle_count;i++){ lo=std::min(lo,a.candles[i].low); hi=std::max(hi,a.candles[i].high); max_volume=std::max(max_volume,a.candles[i].volume); }
   return true;
 }
-static void compact_duration(char*b,size_t n,uint64_t seconds){
-  if(seconds>=86400&&seconds%86400==0)snprintf(b,n,"%lluD",(unsigned long long)(seconds/86400));
-  else if(seconds>=3600&&seconds%3600==0)snprintf(b,n,"%lluH",(unsigned long long)(seconds/3600));
-  else if(seconds>=60&&seconds%60==0)snprintf(b,n,"%lluM",(unsigned long long)(seconds/60));
-  else snprintf(b,n,"%lluS",(unsigned long long)seconds);
-}
-static void candle_window(char*b,size_t n,const Asset&a){
-  if(!candle_interval_seconds){snprintf(b,n,"%u CANDLES",(unsigned)a.candle_count);return;}
-  char interval[16],window[16]; compact_duration(interval,sizeof(interval),candle_interval_seconds);
-  compact_duration(window,sizeof(window),(uint64_t)candle_interval_seconds*a.candle_count);
-  snprintf(b,n,"%s x %u / %s WINDOW",interval,(unsigned)a.candle_count,window);
+// Entry guides never flatten market data: include only entries already in or
+// close to the natural chart range.
+static constexpr double ENTRY_NEAR_FRAC=0.25;
+static constexpr double ENTRY_EDGE_PAD_FRAC=0.02;
+static bool entry_in_view(double entry,double&lo,double&hi){
+  if(!(entry>0)||!std::isfinite(entry))return false;
+  double range=hi-lo; if(!(range>0))return false;
+  if(entry>=lo&&entry<=hi)return true;
+  if(entry>hi&&entry-hi<=range*ENTRY_NEAR_FRAC){hi=entry+range*ENTRY_EDGE_PAD_FRAC;return true;}
+  if(entry<lo&&lo-entry<=range*ENTRY_NEAR_FRAC){lo=entry-range*ENTRY_EDGE_PAD_FRAC;return true;}
+  return false;
 }
 static void sparkline(const Asset&a,int x,int y,int w,int h,bool full=false){
   if(full){ for(int i=1;i<4;i++)draw_line(x,y+(h*i)/4,x+w-1,y+(h*i)/4,GRID); }
@@ -246,8 +283,29 @@ static void update_battery(){
   g_batt.present=(dir==1||dir==2)||(lvl>=1&&lvl<=100);
   g_batt.level=std::max(0,std::min(100,(int)lvl));
 }
-// Toggle the AMOLED display for battery saving (display off command, not sleep — wakes
-// instantly). Driven only by a physical BOOT long-press; there is no auto-timeout.
+// Deliberately narrow PMU write helper. Runtime writes on either board may only
+// enable the PWRKEY short interrupt or consume its latched W1C status bit.
+static bool axp_irq_write(uint8_t reg,uint8_t val){
+  if(!axp_read_dev||!axp_runtime_write_allowed(reg,val))return false;
+  uint8_t b[2]={reg,val}; return i2c_master_transmit(axp_read_dev,b,2,100)==ESP_OK;
+}
+static void axp_pkey_setup(){
+  if(!i2c_bus)return;
+  if(!axp_read_dev){i2c_device_config_t c={};c.dev_addr_length=I2C_ADDR_BIT_LEN_7;c.device_address=0x34;c.scl_speed_hz=400000;if(i2c_master_bus_add_device(i2c_bus,&c,&axp_read_dev)!=ESP_OK){axp_read_dev=nullptr;return;}}
+  uint8_t reg=0x41,en=0;
+  const bool read_ok=i2c_master_transmit_receive(axp_read_dev,&reg,1,&en,1,50)==ESP_OK;
+  const bool armed=read_ok&&axp_irq_write(0x41,en|0x08);
+  const bool cleared=axp_irq_write(0x49,0x08);
+  const uint8_t verify=axp_read(0x41);
+  if(armed&&cleared&&(verify&0x08))ESP_LOGI(TAG,"AXP PWRKEY short IRQ armed: INTEN2=0x%02x",verify);
+  else ESP_LOGE(TAG,"AXP PWRKEY short IRQ setup failed: INTEN2=0x%02x",verify);
+}
+static bool axp_pkey_short(){
+  if(!axp_read_dev)return false;
+  uint8_t reg=0x49,status=0;
+  if(i2c_master_transmit_receive(axp_read_dev,&reg,1,&status,1,50)!=ESP_OK)return false;
+  return (status&0x08)&&axp_irq_write(0x49,0x08);
+}
 static void set_screen(bool on){
   if(on==screen_on)return;
   screen_on=on;
@@ -274,9 +332,11 @@ static void draw(){
   auto& network=NetworkPortal::GetInstance();
   if(network.IsPortalActive()){
     const RuntimeConfigSnapshot runtime=RuntimeConfig::GetInstance().Snapshot();
+    const bool pending=runtime.HasPendingProvisioning();
     const std::string ssid=network.GetApSsid(),password=network.GetApPassword();
     const std::string id_tail=runtime.device_id.size()>12?runtime.device_id.substr(runtime.device_id.size()-12):runtime.device_id;
-    text(20,16,runtime.IsProvisioned()?"SETUP / OTA":"FIRST-BOOT SETUP",WHITE,3);
+    if(privacy_mode)text_right(352,8,"PRIVATE",AMBER,2);
+    text(20,16,runtime.IsProvisioned()?"SETUP / OTA":(pending?"FINISHING SETUP":"FIRST-BOOT SETUP"),WHITE,3);
     text(20,58,"WI-FI",MUTED,2); text(20,82,ssid.c_str(),BLUE,2);
     text(20,118,"PASSWORD",MUTED,2); text(20,142,password.c_str(),WHITE,2);
     text(20,178,"OPEN",MUTED,2); text(20,202,"http://192.168.4.1",WHITE,2);
@@ -285,6 +345,14 @@ static void draw(){
       text(20,286,"OTA ARMED - 5 MIN",AMBER,2);
       const std::string code=network.GetOtaCode();
       snprintf(b,sizeof(b),"CODE %s",code.c_str()); text(20,316,b,WHITE,3);
+    } else if(pending) {
+      const int status=feed_status.load();
+      const char* message=status==ST_PENDING_CHECK?"Checking read-only key":
+                          status==ST_PENDING_READY?"Ready":
+                          status==ST_PENDING_REJECTED?"Setup rejected - retry":
+                          "Waiting for network";
+      text(20,286,message,status==ST_PENDING_REJECTED?AMBER:GREEN,2);
+      text(20,316,"AUTOMATIC - KEEP HOST ON",MUTED,2);
     } else {
       text(20,286,"OTA LOCKED",GREEN,2);
       text(20,316,"HOLD BOOT 10S TO ARM",MUTED,2);
@@ -296,46 +364,71 @@ static void draw(){
   const uint64_t now=esp_timer_get_time()/1000;
   const uint64_t stale_after=std::max<uint64_t>(MIN_STALE_MS,(uint64_t)feed_refresh_seconds*2500ULL);
   const bool stale=last_ok_ms&&now-last_ok_ms>stale_after;
-  draw_battery(16,12);
-  const int status=feed_status.load();
-  const bool feed_problem=status!=ST_UPDATED&&status!=ST_STARTING;
-  const char*page=selected_chart>=0?assets[selected_chart].name:(detail?"POSITIONS":"PRICES");
-  text_right(352,28,page,MUTED,2);
+  draw_battery(16,10);
+  const int current_status=feed_status.load();
+  const bool feed_problem=current_status!=ST_UPDATED&&current_status!=ST_STARTING;
+  char status[24]{};
   if(stale||!wifi_up.load()||feed_problem){
-    if(stale)snprintf(b,sizeof(b),"STALE");
-    else if(!wifi_up.load())snprintf(b,sizeof(b),"OFFLINE");
-    else if(status==ST_UNCONFIGURED)snprintf(b,sizeof(b),"SETUP");
-    else if(status==ST_HTTPERR)snprintf(b,sizeof(b),"HTTP %d",feed_http_code.load());
-    else if(status==ST_JSONERR)snprintf(b,sizeof(b),"JSON ERR");
-    else if(status==ST_TOO_LARGE)snprintf(b,sizeof(b),"TOO LARGE");
-    else if(status==ST_UNSAFE)snprintf(b,sizeof(b),"UNSAFE");
-    else if(status==ST_NOWIFI)snprintf(b,sizeof(b),"NO WIFI");
-    else snprintf(b,sizeof(b),"FEED ERR");
-    text_right(352,8,b,AMBER,2);
-  }
+    if(stale)snprintf(status,sizeof(status),"STALE");
+    else if(!wifi_up.load())snprintf(status,sizeof(status),"OFFLINE");
+    else if(current_status==ST_UNCONFIGURED)snprintf(status,sizeof(status),"SETUP");
+    else if(current_status==ST_HTTPERR)snprintf(status,sizeof(status),"HTTP %d",feed_http_code.load());
+    else if(current_status==ST_JSONERR)snprintf(status,sizeof(status),"JSON ERR");
+    else if(current_status==ST_TOO_LARGE)snprintf(status,sizeof(status),"TOO LARGE");
+    else if(current_status==ST_UNSAFE)snprintf(status,sizeof(status),"UNSAFE");
+    else if(current_status==ST_NOWIFI)snprintf(status,sizeof(status),"NO WIFI");
+    else if(current_status==ST_PENDING_NETWORK)snprintf(status,sizeof(status),"WAITING NET");
+    else if(current_status==ST_PENDING_CHECK)snprintf(status,sizeof(status),"CHECKING KEY");
+    else if(current_status==ST_PENDING_READY)snprintf(status,sizeof(status),"READY");
+    else if(current_status==ST_PENDING_REJECTED)snprintf(status,sizeof(status),"SETUP RETRY");
+    else snprintf(status,sizeof(status),"FEED ERR");
+  } else if(privacy_mode)snprintf(status,sizeof(status),"PRIVATE");
+  if(status[0])text_center(120,132,12,status,AMBER,2);
+  text_right(352,12,display_time.c_str(),AXIS_BLUE,2);
   int top=58;
   if(selected_chart>=0){
     auto&a=assets[selected_chart];
     rect(16,top,336,338,CARD);
     text_bold(28,top+8,a.name,WHITE,3);
-    fmt_money(b,sizeof(b),a.price); text(28+(int)strlen(a.name)*18+12,top+14,b,AMBER,2);
+    fmt_money(b,sizeof(b),a.price); text(28+(int)strlen(a.name)*18+12,top+8,b,AMBER,3);
     double pct=chart_change_pct(a); snprintf(b,sizeof(b),"%+.2f%%",pct); text_right(340,top+14,b,pct>=0?GREEN:RED,2);
-    int gx=32,gy=top+50,gw=304; char t[80];
+    // Reserve a real left gutter for price labels; chart marks never draw there.
+    int gx=106,gy=top+50,gw=230; char t[80];
     if(a.candle_count){
       // Volume candles: body width represents each candle's volume relative to
       // the highest-volume candle in the visible window. No separate volume bars.
       int price_h=224;
       double candle_lo=0,candle_hi=0,max_volume=0; candle_bounds(a,candle_lo,candle_hi,max_volume);
+      double closes[CANDLE_SAMPLES]={}; BollingerPoint bands[CANDLE_SAMPLES]={};
+      for(int i=0;i<a.candle_count;i++)closes[i]=a.candles[i].close;
+      compute_bollinger_bands(closes,a.candle_count,bands,CANDLE_SAMPLES);
+      // Only sane, nearby BB20 values may expand the natural market range. This
+      // prevents corrupt math/data from flattening candles and also avoids drawing
+      // a clamped line along the chart edge.
+      bool band_visible[CANDLE_SAMPLES]={};
       double lo=candle_lo,hi=candle_hi;
       if(a.price>0&&std::isfinite(a.price)){lo=std::min(lo,a.price);hi=std::max(hi,a.price);}
-      if(a.pos.open&&a.pos.entry>0){lo=std::min(lo,a.pos.entry);hi=std::max(hi,a.pos.entry);}
+      for(int i=0;i<a.candle_count;i++)if(bollinger_point_near_range(bands[i],candle_lo,candle_hi)){
+        band_visible[i]=true; lo=std::min(lo,bands[i].lower); hi=std::max(hi,bands[i].upper);
+      }
       double range=hi-lo;
       if(range<1e-9){double pad=std::max(fabs(hi)*0.0005,1e-6);lo-=pad;hi+=pad;}
       else {double pad=range*0.04;lo-=pad;hi+=pad;}
-      for(int i=0;i<=4;i++){int yy=gy+price_h*i/4;draw_line(gx,yy,gx+gw-1,yy,GRID);}
+      // Entry no longer forces the scale; see entry_in_view for the near-range policy.
+      bool show_entry=!privacy_mode&&a.pos.open&&entry_in_view(a.pos.entry,lo,hi);
+      for(int i=0;i<=4;i++){int yy=gy+price_h*i/4;draw_line(gx,yy,gx+gw-1,yy,GRID);char axis[16];format_axis_price(axis,sizeof(axis),chart_level_value(lo,hi,i,4));text_right(gx-8,yy-7,axis,AXIS_BLUE,2);}
       auto py=[&](double v){double n=(v-lo)/(hi-lo);n=std::max(0.0,std::min(1.0,n));return gy+price_h-1-(int)lround(n*(price_h-1));};
+      auto px=[&](int i){return gx+((2*i+1)*gw)/(2*a.candle_count);};
+      bool any_band=false;
+      for(int i=1;i<a.candle_count;i++)if(band_visible[i-1]&&band_visible[i]){
+        draw_line(px(i-1),py(bands[i-1].upper),px(i),py(bands[i].upper),BB_UPPER);
+        draw_line(px(i-1),py(bands[i-1].lower),px(i),py(bands[i].lower),BB_LOWER);
+        draw_line(px(i-1),py(bands[i-1].middle),px(i),py(bands[i].middle),BB_MIDDLE);
+        any_band=true;
+      }
+      if(any_band){rect(gx+gw-50,gy+3,50,18,CARD);text_right(gx+gw,gy+4,"BB20",BB_UPPER,2);}
       int entry_y=-1;
-      if(a.pos.open&&a.pos.entry>0){
+      if(show_entry){
         entry_y=py(a.pos.entry);
         for(int X=gx;X<gx+gw;X+=10)draw_line(X,entry_y,std::min(X+4,gx+gw-1),entry_y,AMBER);
       }
@@ -343,7 +436,7 @@ static void draw(){
       int max_body_w=std::max(1,std::min(11,slot-1));
       if(!(max_body_w&1))max_body_w--;
       for(int i=0;i<a.candle_count;i++){
-        const Candle&cd=a.candles[i]; int cx=gx+((2*i+1)*gw)/(2*a.candle_count);
+        const Candle&cd=a.candles[i]; int cx=px(i);
         uint16_t color=cd.close>=cd.open?GREEN:RED;
         int yh=py(cd.high),yl=py(cd.low),yo=py(cd.open),yc=py(cd.close);
         draw_line(cx,yh,cx,yl,color);
@@ -363,16 +456,18 @@ static void draw(){
       int yb=gy+price_h+8;
       fmt_money(b,sizeof(b),candle_lo);snprintf(t,sizeof(t),"LO %s",b);text(gx,yb,t,MUTED,2);
       fmt_money(b,sizeof(b),candle_hi);snprintf(t,sizeof(t),"HI %s",b);text_right(gx+gw,yb,t,MUTED,2);
-      candle_window(b,sizeof(b),a);text(gx,yb+24,b,MUTED,2);text_right(gx+gw,yb+24,"WIDTH=VOL",MUTED,2);
+      // Freed chart footer row: durable daily-pivot levels do not affect scale.
+      draw_key_level_row(a,gx,gx+gw,yb+24);
     } else {
       // Legacy/partial feeds retain the former close-only expanded line chart.
       int gh=188; double lo=0,hi=0; bool hb=history_bounds(a,lo,hi);
-      if(a.pos.open&&a.pos.entry>0){if(!hb){lo=hi=a.pos.entry;hb=true;}else{lo=std::min(lo,a.pos.entry);hi=std::max(hi,a.pos.entry);}}
       if(!hb){lo=0;hi=1;}
       if(fabs(hi-lo)<1e-9){double pad=std::max(fabs(hi)*0.0005,1e-6);lo-=pad;hi+=pad;}
-      for(int i=0;i<=4;i++){int yy=gy+gh*i/4;draw_line(gx,yy,gx+gw-1,yy,GRID);}
+      // Same policy as the candle chart: entry never forces the scale.
+      bool show_entry=!privacy_mode&&hb&&a.pos.open&&entry_in_view(a.pos.entry,lo,hi);
+      for(int i=0;i<=4;i++){int yy=gy+gh*i/4;draw_line(gx,yy,gx+gw-1,yy,GRID);char axis[16];format_axis_price(axis,sizeof(axis),chart_level_value(lo,hi,i,4));text_right(gx-8,yy-7,axis,AXIS_BLUE,2);}
       auto py=[&](double v){double n=(v-lo)/(hi-lo);n=std::max(0.0,std::min(1.0,n));return gy+gh-1-(int)lround(n*(gh-1));};
-      if(a.pos.open&&a.pos.entry>0){int ey=py(a.pos.entry);for(int X=gx;X<gx+gw;X+=10)draw_line(X,ey,std::min(X+4,gx+gw-1),ey,AMBER);text(gx+2,ey-16,"ENTRY",AMBER,2);}
+      if(show_entry){int ey=py(a.pos.entry);for(int X=gx;X<gx+gw;X+=10)draw_line(X,ey,std::min(X+4,gx+gw-1),ey,AMBER);text(gx+2,ey-16,"ENTRY",AMBER,2);}
       if(a.history_count>=2){
         auto px=[&](int i){return gx+(i*(gw-1))/(a.history_count-1);};
         uint16_t col=history_at(a,a.history_count-1)>=history_at(a,0)?GREEN:RED;
@@ -383,39 +478,55 @@ static void draw(){
       fmt_money(b,sizeof(b),lo);snprintf(t,sizeof(t),"LO %s",b);text(gx,yb,t,MUTED,2);
       fmt_money(b,sizeof(b),hi);snprintf(t,sizeof(t),"HI %s",b);text_right(gx+gw,yb,t,MUTED,2);
       history_window(b,sizeof(b),a);text(gx,yb+24,b,MUTED,2);text_right(gx+gw,yb+24,"TAP < >",MUTED,2);
+      draw_key_level_row(a,gx,gx+gw,yb+48);
     }
   } else if(detail){
-    // Position-only summary: no cash balance or unrelated account total is requested.
+    // Portfolio summary now lives only on the POSITIONS page.
     rect(16,top,336,64,CARD);
     text(28,top+8,"OPEN VALUE",MUTED,2);
-    fmt_money(b,sizeof(b),position_value); text(28,top+32,b,WHITE,3);
-    snprintf(b,sizeof(b),"UPL %+.2f",total_pnl); text_right(340,top+8,b,total_pnl>=0?GREEN:RED,2);
-    snprintf(b,sizeof(b),"RPL %+.2f",realized_pnl_today); text_right(340,top+40,b,realized_pnl_today>=0?GREEN:RED,2);
-    int y=top+72;
-    int open_total=0; for(auto&a:assets)if(a.pos.open)open_total++;
-    snprintf(b,sizeof(b),"OPEN POSITIONS %d",open_total); text(16,y,b,WHITE,2); y+=24;
-    if(!open_total){ text(24,y,"NONE",MUTED,2); y+=28; }
-    int shown=0;
-    for(auto&a:assets){ if(!a.pos.open)continue; if(y+56>392)break;
-      uint16_t sc=(a.pos.side.size()&&(a.pos.side[0]=='S'||a.pos.side[0]=='s'))?RED:GREEN;
-      rect(16,y,336,56,CARD); rect(16,y,6,56,sc);
-      char sd[12]; snprintf(sd,sizeof(sd),"%s",a.pos.side.c_str()); to_upper(sd);
-      char nm[28]; snprintf(nm,sizeof(nm),"%s %s",a.name,sd); text(28,y+6,nm,WHITE,2);
-      fmt_money(b,sizeof(b),a.price); text_right(350,y+4,b,AMBER,3);            // current price, on top
-      char entry[24]; fmt_money(entry,sizeof(entry),a.pos.entry); snprintf(b,sizeof(b),"%.4g @ %s",a.pos.size,entry); text(28,y+34,b,MUTED,2); // size @ purchase price
-      snprintf(b,sizeof(b),"U%+.2f",a.pos.pnl); text_right(350,y+34,b,a.pos.pnl>=0?GREEN:RED,2);
-      y+=60; shown++;
+    if(privacy_mode){
+      text(28,top+32,"$********",WHITE,3);
+      text_right(340,top+8,"UPL ********",MUTED,2);
+      text_right(340,top+40,"RPL ********",MUTED,2);
+    } else {
+      fmt_money(b,sizeof(b),position_value); text(28,top+32,b,WHITE,3);
+      snprintf(b,sizeof(b),"UPL %+.2f",total_pnl); text_right(340,top+8,b,total_pnl>=0?GREEN:RED,2);
+      snprintf(b,sizeof(b),"RPL %+.2f",realized_pnl_today); text_right(340,top+40,b,realized_pnl_today>=0?GREEN:RED,2);
     }
-    if(open_total>shown){ snprintf(b,sizeof(b),"+%d MORE",open_total-shown); text(24,y,b,AMBER,2); y+=24; }
-    if(y+40<392){
-      snprintf(b,sizeof(b),"CLOSED TODAY %u",(unsigned)closed_today.size()); text(16,y,b,WHITE,2); y+=24;
-      if(closed_today.empty())text(24,y,"NONE YET",MUTED,2);
-      else{ int cs=0; for(auto&p:closed_today){ if(cs>=2||y+38>392)break; rect(16,y,336,36,CARD); char sd[12]; snprintf(sd,sizeof(sd),"%s",p.side.c_str()); to_upper(sd); snprintf(b,sizeof(b),"%s %s",p.symbol.c_str(),sd); text(24,y+4,b,WHITE,2); snprintf(b,sizeof(b),"R%+.2f",p.pnl); text_right(350,y+4,b,p.pnl>=0?GREEN:RED,2); snprintf(b,sizeof(b),"SIZE %.4g",p.size); text(24,y+20,b,MUTED,2); y+=40; cs++; } }
+    int y=top+72;
+    if(privacy_mode){
+      text(16,y,"ACCOUNT EXPOSURE",WHITE,2); y+=28;
+      rect(16,y,336,112,CARD);
+      text(28,y+12,"POSITIONS  ********",MUTED,2);
+      text(28,y+40,"QUANTITY   ********",MUTED,2);
+      text(28,y+68,"ENTRY/P&L  ********",MUTED,2);
+      text(28,y+96,"CLOSED     ********",MUTED,2);
+    } else {
+      int open_total=0; for(auto&a:assets)if(a.pos.open)open_total++;
+      snprintf(b,sizeof(b),"OPEN POSITIONS %d",open_total); text(16,y,b,WHITE,2); y+=24;
+      if(!open_total){ text(24,y,"NONE",MUTED,2); y+=28; }
+      int shown=0;
+      for(auto&a:assets){ if(!a.pos.open)continue; if(y+56>392)break;
+        uint16_t sc=(a.pos.side.size()&&(a.pos.side[0]=='S'||a.pos.side[0]=='s'))?RED:GREEN;
+        rect(16,y,336,56,CARD); rect(16,y,6,56,sc);
+        char sd[12]; snprintf(sd,sizeof(sd),"%s",a.pos.side.c_str()); to_upper(sd);
+        char nm[28]; snprintf(nm,sizeof(nm),"%s %s",a.name,sd); text(28,y+6,nm,WHITE,2);
+        fmt_money(b,sizeof(b),a.price); text_right(350,y+4,b,AMBER,3);            // current price, on top
+        char entry[24]; fmt_entry_money(entry,sizeof(entry),a.pos.entry); snprintf(b,sizeof(b),"%.4g @ %s",a.pos.size,entry); text(28,y+34,b,MUTED,2); // size @ live average entry, always precise enough to see changes
+        snprintf(b,sizeof(b),"U%+.2f",a.pos.pnl); text_right(350,y+34,b,a.pos.pnl>=0?GREEN:RED,2);
+        y+=60; shown++;
+      }
+      if(open_total>shown){ snprintf(b,sizeof(b),"+%d MORE",open_total-shown); text(24,y,b,AMBER,2); y+=24; }
+      if(y+40<392){
+        snprintf(b,sizeof(b),"CLOSED TODAY %u",(unsigned)closed_today.size()); text(16,y,b,WHITE,2); y+=24;
+        if(closed_today.empty())text(24,y,"NONE YET",MUTED,2);
+        else{ int cs=0; for(auto&p:closed_today){ if(y+38>392)break; rect(16,y,336,36,CARD); char sd[12]; snprintf(sd,sizeof(sd),"%s",p.side.c_str()); to_upper(sd); snprintf(b,sizeof(b),"%s %s",p.symbol.c_str(),sd); text(24,y+4,b,WHITE,2); snprintf(b,sizeof(b),"R%+.2f",p.pnl); text_right(350,y+4,b,p.pnl>=0?GREEN:RED,2); snprintf(b,sizeof(b),"SIZE %.4g",p.size); text(24,y+20,b,MUTED,2); y+=40; cs++; } if((int)closed_today.size()>cs&&y+16<=392){snprintf(b,sizeof(b),"+%u MORE",(unsigned)closed_today.size()-cs);text(24,y,b,AMBER,2);} }
+      }
     }
   } else {
     // PRICES page: open positions get taller/bolder rows with an amber live price.
     int y=top; px_row_n=0;
-    for(int i=0;i<5;i++){ auto&a=assets[i]; bool open=a.pos.open; int rh=open?64:50;
+    for(int i=0;i<5;i++){ auto&a=assets[i]; bool open=!privacy_mode&&a.pos.open; int rh=open?64:50;
       px_row_y[px_row_n]=y; px_row_h[px_row_n]=rh; px_row_asset[px_row_n]=i; px_row_n++;
       rect(16,y,336,rh,CARD);
       if(open){
@@ -430,7 +541,7 @@ static void draw(){
         text(24,y+6,a.name,WHITE,2);
         fmt_money(b,sizeof(b),a.price); text(96,y+6,b,MUTED,2);
         sparkline(a,210,y+4,140,18,false);
-        text(24,y+28,"FLAT",MUTED,2);
+        text(24,y+28,privacy_mode?"MARKET":"FLAT",MUTED,2);
         double pct=history_change_pct(a); if(a.history_count>=2){snprintf(b,sizeof(b),"%+.2f%%",pct);text_right(350,y+28,b,pct>=0?GREEN:RED,2);}
       }
       y+=rh+2;
@@ -439,6 +550,12 @@ static void draw(){
   // Single full-width view toggle. No refresh button — prices are live.
   { const char*bl=selected_chart>=0||detail?"PRICES":"POSITIONS"; rect(16,400,336,36,BLUE); text_center(16,336,410,bl,WHITE,2); }
   flush_frame();
+}
+static bool toggle_privacy(){
+  if(state_mux)xSemaphoreTake(state_mux,portMAX_DELAY);
+  privacy_mode=!privacy_mode; const bool enabled=privacy_mode;
+  if(state_mux)xSemaphoreGive(state_mux);
+  return enabled;
 }
 // draw() reads feed state owned by the network task, so serialize it with state_mux.
 static void draw_locked(){ if(state_mux)xSemaphoreTake(state_mux,portMAX_DELAY); draw(); if(state_mux)xSemaphoreGive(state_mux); }
@@ -462,6 +579,13 @@ static void touch_task(void*){
   ESP_LOGI(TAG,"touch task polling 0x%02x",addr);
   bool down=false;
   while(true){
+    if(xEventGroupGetBits(standby_events)&STANDBY_REQUEST){
+      down=false;
+      xEventGroupSetBits(standby_events,TOUCH_IDLE);
+      while(xEventGroupGetBits(standby_events)&STANDBY_REQUEST)vTaskDelay(pdMS_TO_TICKS(20));
+      xEventGroupClearBits(standby_events,TOUCH_IDLE);
+      continue;
+    }
     bool pressed=false; int x=0,y=0;
 #if BOARD_IS_V1
     bool ready=gpio_get_level(GPIO_NUM_21)==0;   // FT NACKs while idle; INT low = awake
@@ -481,18 +605,118 @@ static void touch_task(void*){
     vTaskDelay(pdMS_TO_TICKS(10));
   }
 }
-struct HttpResponse { std::vector<char> body; bool overflow=false; };
+struct HttpResponse { std::vector<char> body; bool overflow=false; size_t maximum=MAX_FEED_BYTES; };
+static uint32_t pending_retry_ms=1000;
 static esp_err_t http_evt(esp_http_client_event_t *e){
   auto*r=static_cast<HttpResponse*>(e->user_data);
   if(e->event_id==HTTP_EVENT_ON_DATA&&e->data_len>0){
-    if(r->body.size()+(size_t)e->data_len>MAX_FEED_BYTES){r->overflow=true;return ESP_FAIL;}
+    if(r->body.size()+(size_t)e->data_len>r->maximum){r->overflow=true;return ESP_FAIL;}
     const char*p=static_cast<const char*>(e->data);r->body.insert(r->body.end(),p,p+e->data_len);
   }
   return ESP_OK;
 }
+static std::string onboarding_url(const std::string& bridge_url,const char* path){
+  static constexpr const char* feed_path="/v1/device-feed";
+  if(bridge_url.size()<=strlen(feed_path)||
+     bridge_url.compare(bridge_url.size()-strlen(feed_path),strlen(feed_path),feed_path)!=0)return {};
+  return bridge_url.substr(0,bridge_url.size()-strlen(feed_path))+path;
+}
+static bool pending_expired_by_wall_clock(int64_t expires_at){
+  constexpr int64_t MIN_VALID_EPOCH=1577836800;  // 2020-01-01 UTC
+  const int64_t now=static_cast<int64_t>(time(nullptr));
+  return now>=MIN_VALID_EPOCH&&expires_at>0&&now>=expires_at;
+}
+static bool fetch_pending(RuntimeConfigSnapshot runtime){
+  if(pending_expired_by_wall_clock(runtime.pending_expires_at)){
+    RuntimeConfig::GetInstance().ClearPendingProvisioning();
+    std::fill(runtime.pending_token.begin(),runtime.pending_token.end(),'\0');
+    feed_status=ST_PENDING_REJECTED;data_dirty=true;pending_retry_ms=1000;
+    return false;
+  }
+  if(!wifi_up.load()){
+    feed_status=ST_PENDING_NETWORK;data_dirty=true;
+    pending_retry_ms=std::min<uint32_t>(pending_retry_ms*2,30000);
+    return false;
+  }
+  const std::string claim_url=onboarding_url(runtime.pending_bridge_url,"/v1/onboarding/claim");
+  if(claim_url.empty()){
+    RuntimeConfig::GetInstance().ClearPendingProvisioning();
+    feed_status=ST_PENDING_REJECTED;data_dirty=true;return false;
+  }
+  HttpResponse response;response.maximum=2048;
+  std::string auth="Bearer "+runtime.pending_token;
+  esp_http_client_config_t cfg={};
+  cfg.url=claim_url.c_str();cfg.event_handler=http_evt;cfg.user_data=&response;
+  cfg.timeout_ms=12000;cfg.disable_auto_redirect=true;cfg.method=HTTP_METHOD_POST;
+  if(claim_url.rfind("https://",0)==0)cfg.crt_bundle_attach=esp_crt_bundle_attach;
+  esp_http_client_handle_t h=esp_http_client_init(&cfg);
+  if(!h){
+    std::fill(auth.begin(),auth.end(),'\0');
+    std::fill(runtime.pending_token.begin(),runtime.pending_token.end(),'\0');
+    feed_status=ST_PENDING_NETWORK;data_dirty=true;
+    pending_retry_ms=std::min<uint32_t>(pending_retry_ms*2,30000);return false;
+  }
+  esp_http_client_set_header(h,"Authorization",auth.c_str());
+  esp_http_client_set_header(h,"X-Device-ID",runtime.pending_device_id.c_str());
+  esp_http_client_set_header(h,"Accept","application/json");
+  esp_http_client_set_header(h,"User-Agent","amoled-terminal/1");
+  esp_http_client_set_post_field(h,"",0);
+  const esp_err_t err=esp_http_client_perform(h);
+  const int code=esp_http_client_get_status_code(h);
+  esp_http_client_cleanup(h);
+  std::fill(auth.begin(),auth.end(),'\0');
+  std::fill(runtime.pending_token.begin(),runtime.pending_token.end(),'\0');
+  ESP_LOGI(TAG,"pending setup request status=%d result=%s bytes=%u",code,
+           esp_err_to_name(err),(unsigned)response.body.size());
+  if(response.overflow||err!=ESP_OK){
+    feed_status=ST_PENDING_NETWORK;data_dirty=true;
+    pending_retry_ms=std::min<uint32_t>(pending_retry_ms*2,30000);return false;
+  }
+  if(code==401||code==410){
+    RuntimeConfig::GetInstance().ClearPendingProvisioning();
+    feed_status=ST_PENDING_REJECTED;data_dirty=true;return false;
+  }
+  if(code!=200){
+    feed_status=ST_PENDING_NETWORK;data_dirty=true;
+    pending_retry_ms=std::min<uint32_t>(pending_retry_ms*2,30000);return false;
+  }
+  response.body.push_back('\0');
+  cJSON* root=cJSON_ParseWithLengthOpts(response.body.data(),response.body.size(),nullptr,true);
+  cJSON* status_item=nullptr;int status_count=0;
+  for(cJSON* item=root?root->child:nullptr;item;item=item->next)
+    if(item->string&&strcmp(item->string,"status")==0){status_item=item;status_count++;}
+  if(!cJSON_IsObject(root)||status_count!=1||!cJSON_IsString(status_item)||
+     !status_item->valuestring||strlen(status_item->valuestring)>32){
+    if(root)cJSON_Delete(root);
+    feed_status=ST_PENDING_NETWORK;data_dirty=true;
+    pending_retry_ms=std::min<uint32_t>(pending_retry_ms*2,30000);return false;
+  }
+  const std::string status=status_item->valuestring;
+  cJSON_Delete(root);
+  if(status=="ready"){
+    const esp_err_t promote=RuntimeConfig::GetInstance().PromotePendingProvisioning();
+    if(promote!=ESP_OK){
+      ESP_LOGE(TAG,"pending setup promotion failed: %s",esp_err_to_name(promote));
+      feed_status=ST_PENDING_REJECTED;data_dirty=true;return false;
+    }
+    pending_retry_ms=1000;feed_status=ST_PENDING_READY;
+    NetworkPortal::GetInstance().CompletePendingSetup();
+    force_fetch=true;data_dirty=true;
+    return true;
+  }
+  if(status=="rejected"){
+    RuntimeConfig::GetInstance().ClearPendingProvisioning();
+    feed_status=ST_PENDING_REJECTED;data_dirty=true;return false;
+  }
+  if(status=="checking_read_only_key")feed_status=ST_PENDING_CHECK;
+  else if(status=="waiting_for_network")feed_status=ST_PENDING_NETWORK;
+  else feed_status=ST_PENDING_NETWORK;
+  pending_retry_ms=2000;data_dirty=true;return false;
+}
 static bool fetch(){
-  if(!wifi_up.load()){feed_status=ST_NOWIFI;data_dirty=true;return false;}
   RuntimeConfigSnapshot runtime=RuntimeConfig::GetInstance().Snapshot();
+  if(runtime.HasPendingProvisioning())return fetch_pending(std::move(runtime));
+  if(!wifi_up.load()){feed_status=ST_NOWIFI;data_dirty=true;return false;}
   if(!runtime.IsProvisioned()){feed_status=ST_UNCONFIGURED;data_dirty=true;return false;}
 
   HttpResponse response;
@@ -531,8 +755,10 @@ static bool fetch(){
   cJSON*prices=cJSON_GetObjectItemCaseSensitive(d,"prices");
   cJSON*price_history=cJSON_GetObjectItemCaseSensitive(d,"price_history");
   cJSON*candles=cJSON_GetObjectItemCaseSensitive(d,"candles");
+  cJSON*key_levels=cJSON_GetObjectItemCaseSensitive(d,"key_levels");
   cJSON*positions=cJSON_GetObjectItemCaseSensitive(d,"positions");
   cJSON*portfolio=cJSON_GetObjectItemCaseSensitive(d,"portfolio");
+  cJSON*clock=cJSON_GetObjectItemCaseSensitive(d,"display_time");
   if(!cJSON_IsObject(prices)||!cJSON_IsObject(positions)||!cJSON_IsObject(portfolio)){
     cJSON_Delete(d);feed_status=ST_JSONERR;data_dirty=true;return false;
   }
@@ -541,6 +767,7 @@ static bool fetch(){
   position_value=num(portfolio,"positions_value");
   total_pnl=num(portfolio,"unrealized_pnl");
   realized_pnl_today=num(portfolio,"realized_pnl_today");
+  if(cJSON_IsString(clock)&&valid_display_time(clock->valuestring))display_time=clock->valuestring;
   double refresh=num(d,"refresh_seconds");
   if(refresh>=2&&refresh<=3600)feed_refresh_seconds=(uint32_t)refresh;
   double history_step=num(d,"price_history_seconds");
@@ -550,6 +777,7 @@ static bool fetch(){
   candle_interval_seconds=candle_step>=1&&candle_step<=604800?(uint32_t)candle_step:0;
   for(auto&a:assets){
     load_candles(a,candles);
+    load_key_levels(a,key_levels);
     bool loaded=load_price_history(a,price_history);double price=num(prices,a.name);
     if(price>0&&std::isfinite(price)){a.price=price;if(!loaded)push_price(a,price);}
     a.pos=Position{};cJSON*p=cJSON_GetObjectItemCaseSensitive(positions,a.name);
@@ -691,6 +919,7 @@ static void init_rest(){
   ESP_LOGI(TAG,"touch %s",touch?"ready":"unavailable");
   gpio_config_t gb={.pin_bit_mask=1ULL<<GPIO_NUM_0,.mode=GPIO_MODE_INPUT,.pull_up_en=GPIO_PULLUP_ENABLE,.pull_down_en=GPIO_PULLDOWN_DISABLE,.intr_type=GPIO_INTR_DISABLE}; gpio_config(&gb);
   update_battery();   // seed the power indicator before the first UI frame
+  axp_pkey_setup();   // safe 0x41/0x49 accesses only; never a V2 rail write
 }
 // Network fetch runs on its own task so the blocking HTTP round trip never stalls
 // touch sampling or rendering in the UI loop. It writes shared feed state under
@@ -698,13 +927,74 @@ static void init_rest(){
 static void fetch_task(void*){
   uint64_t last=0;
   while(true){
+    if(xEventGroupGetBits(standby_events)&STANDBY_REQUEST){
+      xEventGroupSetBits(standby_events,FEED_IDLE);
+      while(xEventGroupGetBits(standby_events)&STANDBY_REQUEST)vTaskDelay(pdMS_TO_TICKS(20));
+      xEventGroupClearBits(standby_events,FEED_IDLE);
+      last=0;
+      continue;
+    }
     const uint64_t now=esp_timer_get_time()/1000;
-    const uint32_t interval_ms=feed_refresh_seconds?feed_refresh_seconds*1000u:REFRESH_MS;
+    const bool pending=RuntimeConfig::GetInstance().HasPendingProvisioning();
+    const uint32_t interval_ms=pending?pending_retry_ms:
+        (feed_refresh_seconds?feed_refresh_seconds*1000u:REFRESH_MS);
     const bool requested=force_fetch.exchange(false);
     // A physically opened setup/OTA AP does not pause an already connected feed.
     if(requested||last==0||now-last>=interval_ms){last=now;fetch();}
     vTaskDelay(pdMS_TO_TICKS(100));
   }
+}
+// No cross-variant-safe ESP32 wake GPIO for the AXP IRQ has been verified.
+// Stop workers and Wi-Fi, then use 250 ms timer-sliced light sleep and poll only
+// latched INTSTS2 bit 3 between slices. RAM, framebuffer, and task state survive.
+static bool enter_screen_off_standby(NetworkPortal& network){
+  if(network.IsOtaArmed()||network.IsOtaBusy()){
+    ESP_LOGW(TAG,"POWER standby deferred while manual OTA is armed or active");
+    return false;
+  }
+#if !BOARD_IS_V1
+  if(!PauseV2AutomaticOtaForStandby(20000)){
+    ESP_LOGW(TAG,"POWER standby deferred while automatic OTA is active");
+    return false;
+  }
+#endif
+  set_screen(false);
+  tap_x.store(-1,std::memory_order_release);
+  tap_y.store(-1,std::memory_order_relaxed);
+  xEventGroupClearBits(standby_events,FEED_IDLE|TOUCH_IDLE);
+  xEventGroupSetBits(standby_events,STANDBY_REQUEST);
+  const EventBits_t idle=xEventGroupWaitBits(
+      standby_events,FEED_IDLE|TOUCH_IDLE,pdFALSE,pdTRUE,pdMS_TO_TICKS(20000));
+  if((idle&(FEED_IDLE|TOUCH_IDLE))!=(FEED_IDLE|TOUCH_IDLE)){
+    ESP_LOGE(TAG,"standby aborted: worker pause timeout bits=0x%lx",(unsigned long)idle);
+    xEventGroupClearBits(standby_events,STANDBY_REQUEST);
+    set_screen(true);
+#if !BOARD_IS_V1
+    ResumeV2AutomaticOtaAfterStandby();
+#endif
+    return false;
+  }
+  network.Suspend();
+  ESP_LOGI(TAG,"standby entered by POWER: panel/feed/touch/Wi-Fi off; 250ms AXP 0x49 polling");
+  bool power_wake=false;
+  while(!power_wake){
+    ESP_ERROR_CHECK(esp_sleep_enable_timer_wakeup(kPowerPollSliceUs));
+    const esp_err_t sleep_err=esp_light_sleep_start();
+    if(sleep_err!=ESP_OK)ESP_LOGW(TAG,"standby light-sleep slice failed: %s",esp_err_to_name(sleep_err));
+    power_wake=axp_pkey_short();  // only INTSTS2 0x49 bit 3 read + W1C consume
+  }
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
+  network.Resume();
+  force_fetch.store(true,std::memory_order_release);
+  data_dirty.store(true,std::memory_order_release);
+  xEventGroupClearBits(standby_events,STANDBY_REQUEST);
+  set_screen(true);
+  draw_locked();
+#if !BOARD_IS_V1
+  ResumeV2AutomaticOtaAfterStandby();
+#endif
+  ESP_LOGI(TAG,"standby wake by POWER: Wi-Fi/tasks resumed and fresh fetch requested");
+  return true;
 }
 extern "C" void app_main(){
   ESP_LOGI(TAG,"board variant: %s",BOARD_IS_V1?"v1 SH8601/FT5x06/AXP2101":"v2 CO5300/CST820");
@@ -717,8 +1007,13 @@ extern "C" void app_main(){
   }
   ESP_ERROR_CHECK(err);
   ESP_ERROR_CHECK(RuntimeConfig::GetInstance().Initialize());
+  err=OnboardingMetadata::GetInstance().Initialize();
+  if(err!=ESP_OK&&err!=ESP_ERR_NOT_FOUND)
+    ESP_LOGW(TAG,"unable to read USB onboarding metadata: %s",esp_err_to_name(err));
   init_rest();
-  state_mux=xSemaphoreCreateMutex();if(!state_mux)abort();
+  state_mux=xSemaphoreCreateMutex();
+  standby_events=xEventGroupCreate();
+  if(!state_mux||!standby_events)abort();
 
   err=esp_ota_mark_app_valid_cancel_rollback();
   if(err!=ESP_OK&&err!=ESP_ERR_OTA_ROLLBACK_INVALID_STATE)
@@ -728,41 +1023,61 @@ extern "C" void app_main(){
   network.Initialize(
     [](bool connected){wifi_up=connected;if(connected)force_fetch=true;data_dirty=true;},
     [](){data_dirty=true;});
+#if !BOARD_IS_V1
+  StartV2AutomaticOta();
+#endif
   draw_locked();
   xTaskCreate(fetch_task,"feed",12288,nullptr,4,nullptr);
   xTaskCreate(touch_task,"touch",3072,nullptr,6,nullptr);
 
-  uint64_t last_draw=esp_timer_get_time()/1000,button_at=0,last_batt=0;
+  ESP_LOGI(TAG,"controls: POWER short=standby/wake; BOOT short=blue action; BOOT 0.8-<10s=privacy; BOOT 10s=OTA");
+  uint64_t last_draw=esp_timer_get_time()/1000,button_at=0,last_batt=0,last_pkey=0;
   bool button_down=false,ota_hold_handled=false;
   bool shown_portal=network.IsPortalActive(),shown_armed=network.IsOtaArmed();
-  // Touch has its own 10 ms task; this loop consumes latched taps and never blocks
-  // on network I/O. Frame flushes occur only when state changes or once per second.
   while(true){
-    const uint64_t now=esp_timer_get_time()/1000;
+    uint64_t now=esp_timer_get_time()/1000;
     bool need_draw=false;
     const bool portal=network.IsPortalActive(),armed=network.IsOtaArmed();
     if(portal!=shown_portal||armed!=shown_armed){shown_portal=portal;shown_armed=armed;need_draw=true;}
     if(data_dirty.exchange(false))need_draw=true;
-    const int tx=tap_x.exchange(-1,std::memory_order_acquire);
-    const int ty=tap_y.load(std::memory_order_relaxed);
-    if(tx>=0){
-      tap_y=-1;
-      if(!portal&&screen_on){
-        if(ty>=390){if(selected_chart>=0)selected_chart=-1;else detail=!detail;need_draw=true;}
-        else if(selected_chart>=0&&ty>=54&&ty<390){selected_chart=(selected_chart+(tx<W/2?4:1))%5;need_draw=true;}
-        else if(!detail&&ty>=54&&ty<390){for(int k=0;k<px_row_n;k++)if(ty>=px_row_y[k]&&ty<px_row_y[k]+px_row_h[k]){selected_chart=px_row_asset[k];need_draw=true;break;}}
+
+    if(now-last_pkey>=100){
+      last_pkey=now;
+      if(axp_pkey_short()){
+        ESP_LOGI(TAG,"POWER short: entering screen standby");
+        enter_screen_off_standby(network);
+        now=esp_timer_get_time()/1000;
+        last_draw=last_batt=last_pkey=now;
+        shown_portal=network.IsPortalActive();
+        shown_armed=network.IsOtaArmed();
+        need_draw=false;
       }
     }
+
+    const int tx=tap_x.exchange(-1,std::memory_order_acquire);
+    const int ty=tap_y.exchange(-1,std::memory_order_relaxed);
+    if(tx>=0&&!portal&&screen_on){
+      if(ty>=390){activate_bottom_action(selected_chart,detail);need_draw=true;}
+      else if(selected_chart>=0&&ty>=54&&ty<390){selected_chart=(selected_chart+(tx<W/2?4:1))%5;need_draw=true;}
+      else if(!detail&&ty>=54&&ty<390){for(int k=0;k<px_row_n;k++)if(ty>=px_row_y[k]&&ty<px_row_y[k]+px_row_h[k]){selected_chart=px_row_asset[k];need_draw=true;break;}}
+    }
+
     const bool pressed=gpio_get_level(GPIO_NUM_0)==0;
     if(pressed&&!button_down){button_at=now;ota_hold_handled=false;}
-    if(pressed&&!ota_hold_handled&&now-button_at>=10000){
-      if(!screen_on)set_screen(true);
+    if(boot_should_arm_ota(pressed,now-button_at,ota_hold_handled)){
       network.ArmOta();ota_hold_handled=true;need_draw=true;
+      ESP_LOGI(TAG,"BOOT continuous 10s: manual OTA armed");
     }
     if(!pressed&&button_down&&!ota_hold_handled){
       const uint64_t held=now-button_at;
-      if(held>=750){set_screen(!screen_on);if(screen_on)need_draw=true;}
-      else if(!portal&&screen_on){if(selected_chart>=0)selected_chart=-1;else detail=!detail;need_draw=true;}
+      const BootReleaseAction action=boot_release_action(held,false);
+      if(action==BootReleaseAction::kTogglePrivacy){
+        const bool enabled=toggle_privacy();need_draw=screen_on;
+        ESP_LOGI(TAG,"BOOT long release: privacy %s",enabled?"ON":"OFF");
+      } else if(action==BootReleaseAction::kBottomAction&&!portal&&screen_on){
+        activate_bottom_action(selected_chart,detail);need_draw=true;
+        ESP_LOGI(TAG,"BOOT short: blue bottom action");
+      }
     }
     button_down=pressed;
     if(now-last_batt>=5000){update_battery();last_batt=now;need_draw=true;}

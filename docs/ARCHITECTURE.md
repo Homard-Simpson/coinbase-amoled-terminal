@@ -64,6 +64,22 @@ The bridge must not expose a generic Coinbase proxy. A route that accepts an
 arbitrary upstream path, method, body, product, or account identifier would break
 the security boundary even if its current caller uses only reads.
 
+### Installer and localhost onboarding
+
+The per-user installer is also the USB flasher and setup-session coordinator. It
+verifies one versioned firmware manifest and each artifact digest, resolves the
+board only from an exact accepted firmware hash or an explicit V1/V2 choice, and
+writes a bounded one-time metadata envelope to a dedicated flash partition. It
+does not erase unrelated NVS.
+
+The onboarding HTTP server binds only to loopback. Captive-portal JavaScript sends
+Coinbase JSON straight to that authenticated endpoint under exact Origin,
+CORS/PNA, method, content-type, size, CSRF, expiry, and single-use controls. After
+the read-only permission gate succeeds, it returns only safe device provisioning
+values. The browser—not the bridge—then sends a separate allowlisted form to the
+ESP. A same-computer localhost page is available when a captive mini-browser
+blocks the direct request.
+
 ### Reverse proxy or private-tailnet ingress
 
 The bridge process binds to loopback by default. Cross-host access should be
@@ -84,8 +100,18 @@ The firmware:
   feed token;
 - polls the fixed read-only feed route;
 - validates HTTP status, size, schema version, types, and numeric bounds;
-- renders last-known-good data with clear stale/offline states; and
-- selects V1 or V2 hardware support at build time.
+- renders last-known-good data with clear stale/offline states, bridge-local
+  fixed-width 12-hour time, privacy mode, and muted chart-axis prices;
+- selects V1 or V2 hardware support at build time;
+- maps POWER short press to coordinated standby/wake and BOOT to the current blue
+  action, privacy, or manual OTA based on exact hold duration; and
+- on V2 only, periodically authenticates the production-ready latest release with
+  the pinned Ed25519 manifest key and installs only a strictly newer stable V2
+  application after signed size, SHA-256, project, version, and board checks.
+
+POWER standby takes the V2 updater gate before pausing Wi-Fi, feed, touch, and
+the panel. It waits or remains awake instead of interrupting an inactive-slot
+write. V1 does not compile the automatic updater.
 
 It never receives a Coinbase API key and has no code path for order or transfer
 operations.
@@ -98,8 +124,11 @@ operations.
 | Secret storage ↔ bridge | Owner-readable local storage | Other host users and container layers | File permissions, read-only mount, no image copy |
 | Bridge ↔ ingress | Loopback service | Proxy configuration and host network | Loopback bind, method/path allowlist |
 | Ingress ↔ ESP | Private network endpoints | Network observers and lost devices | HTTPS, scoped token, ACL, rotation |
-| Firmware ↔ display hardware | Selected board variant | Incorrect revision or electrical assumptions | Explicit build selector, clean dual builds |
-| Display ↔ nearby people | Operator | Anyone with visual or physical access | Minimal data, screen-off control, NVS erase |
+| USB flasher ↔ display hardware | Accepted manifest and explicit board identity | Ambiguous or wrong V1/V2 selection | Exact firmware-hash detection or no-default human choice; approved offsets only |
+| Captive browser ↔ localhost onboarding | Short-lived loopback session | Captive portal and other browser origins | Exact Origin/CORS/PNA, bearer + CSRF binding, bounded single-use requests |
+| Localhost onboarding ↔ ESP portal | Browser-held safe provisioning response | Any field that could contain a Coinbase key | Independent allowlisted `/save` form; unknown/duplicate/private-key fields rejected |
+| Firmware ↔ display hardware | Selected board variant | Incorrect revision or electrical assumptions | Explicit build selector, clean dual builds, V2 compile guard against V1 rail writes, narrow shared PWRKEY IRQ allowlist |
+| Display ↔ nearby people | Operator | Anyone with visual or physical access | Minimal data, privacy mode, POWER standby, NVS erase |
 
 ## Feed contract
 
@@ -218,11 +247,18 @@ The firmware source is shared, but hardware-specific code is selected explicitly
 - `v1`: SH8601 display and FT5x06-family touch path, including required V1 power
   sequencing;
 - `v2`: CO5300 display and CST816S/CST820-family touch path, avoiding V1-only PMU
-  writes.
+  rail writes.
 
-CI builds both variants from clean state with placeholder provisioning. Release
-images are built locally with intentionally supplied per-device values and then
-scanned before publication. CI placeholder artifacts are never production images.
+Both builds use only AXP2101 `0x41` bit-3 enable and `0x49 = 0x08` write-one-to-
+clear at runtime for the physical PWRKEY short-press event. The allowlist cannot
+address rail-control registers `0x80` through `0x99`.
+
+CI builds both variants from clean state without credentials or per-device
+provisioning. Release artifacts are board-specific and accompanied by a manifest
+of offsets, sizes, SHA-256 digests, IDF version, and readiness/attestation flags.
+The installer creates per-device values at runtime and puts only temporary session
+metadata in the onboarding partition. CI artifacts are never production images
+until the manifest controls and both real-hardware checklists are approved.
 
 ## Design decisions
 

@@ -32,6 +32,10 @@ board variants, the bridge, documentation, and publication artifacts pass review
   or generic upstream proxy behavior.
 - [ ] Verify Coinbase credentials are loaded only on the bridge.
 - [ ] Verify firmware receives only the scoped feed token.
+- [ ] Run browser automation against the fake ESP and localhost endpoint; verify
+  Coinbase JSON never appears in the ESP request body.
+- [ ] Verify setup authorization expiry, single use, exact Origin/CORS/PNA,
+  request bounds, permission refusal, and transaction rollback tests.
 - [ ] Confirm authorization headers and account payloads are absent from logs.
 - [ ] Review CodeQL, dependency, secret-scanning, and `pip-audit` results.
 - [ ] Triage or explicitly document every remaining security alert.
@@ -63,12 +67,21 @@ board variants, the bridge, documentation, and publication artifacts pass review
 
 - [ ] Build V1 from clean state.
 - [ ] Build V2 from clean state.
+- [ ] Run `./firmware/tests/run.sh` and verify control/UI/PMU contracts pass.
 - [ ] Ensure artifact names contain the board variant and version.
 - [ ] Verify production provisioning was injected locally and generated headers
   were removed after each build.
 - [ ] Scan strings and symbols for credential material and private infrastructure.
 - [ ] Verify no NVS/full-flash dump is included.
 - [ ] Record SHA-256 checksums.
+- [ ] Generate the canonical versioned release manifest and verify every URL,
+  offset, size, digest, board, and ESP-IDF `5.5.2` field.
+- [ ] Confirm the release manifest sets production readiness, controls
+  verification, and both board hardware-attestation fields only from recorded
+  evidence.
+- [ ] Verify USB install writes only manifest-approved firmware regions and the
+  dedicated onboarding partition; unrelated NVS remains byte-for-byte unchanged.
+- [ ] Verify the V2 binary contains no V1 AXP2101 transmit path.
 
 ## 7. Hardware smoke test — V1
 
@@ -77,6 +90,11 @@ board variants, the bridge, documentation, and publication artifacts pass review
 - [ ] FT5x06-family touch works across the screen.
 - [ ] Wi-Fi, HTTPS feed, stale/offline state, and reconnect pass.
 - [ ] Wired recovery and OTA rollback path are available.
+- [ ] POWER short standby/wake; BOOT short blue action; BOOT 0.8–<10 second
+  privacy toggle; and continuous 10-second OTA arming match the documented
+  production contract.
+- [ ] Captive portal completes with a synthetic P-256 view-only test transport and
+  clears the one-time onboarding partition after success.
 
 ## 8. Hardware smoke test — V2
 
@@ -85,6 +103,16 @@ board variants, the bridge, documentation, and publication artifacts pass review
 - [ ] CST816S/CST820-family touch works across the screen.
 - [ ] Wi-Fi, HTTPS feed, stale/offline state, and reconnect pass.
 - [ ] Wired recovery and OTA rollback path are available.
+- [ ] POWER short standby/wake; BOOT short blue action; BOOT 0.8–<10 second
+  privacy toggle; and continuous 10-second OTA arming match the documented
+  production contract.
+- [ ] Confirm V2 performs only the shared PWRKEY IRQ writes at runtime and no
+  V1-only AXP2101 rail write before, during, or after onboarding.
+- [ ] Verify a signed strictly newer V2 update installs, same/older/prerelease or
+  bad-signature artifacts fail closed, rollback works, and POWER standby cannot
+  interrupt an active automatic update.
+- [ ] Captive portal completes with a synthetic P-256 view-only test transport and
+  clears the one-time onboarding partition after success.
 
 ## 9. Documentation and UX
 
@@ -93,6 +121,8 @@ board variants, the bridge, documentation, and publication artifacts pass review
 - [ ] Confirm commands do not contain user-specific paths or live endpoints.
 - [ ] Confirm interface images come from the actual renderer with only public or
   sanitized data, have documented provenance, and are metadata-stripped.
+- [ ] For every user-visible firmware change, update the public README and
+  regenerate interface screenshots when the rendered UI changed.
 - [ ] Update hardware matrix and troubleshooting notes.
 - [ ] Recheck trademark disclaimer and unofficial-project wording.
 
@@ -102,7 +132,8 @@ board variants, the bridge, documentation, and publication artifacts pass review
 - [ ] Publish separate, unmistakably labeled V1 and V2 artifacts if binaries are
   included.
 - [ ] Include checksums and an artifact manifest.
-- [ ] Sign the tag and artifacts when release infrastructure supports it.
+- [ ] Sign the tag, manifest, and artifacts with the approved release identity;
+  record verification instructions and keep signing material out of CI logs.
 - [ ] State whether binaries are placeholder, unprovisioned, or locally
   provisioned; never imply CI placeholders are ready to flash.
 - [ ] Verify downloaded artifacts against published checksums.

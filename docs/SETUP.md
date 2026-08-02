@@ -3,6 +3,91 @@
 This guide describes a safe baseline. Component-specific flags may evolve before
 1.0; check `bridge/README.md` and `firmware/README.md` for implementation details.
 
+## Consumer setup: two steps
+
+> **Current stable release:** `v2.0.0`, signed and hardware-verified for both
+> Waveshare V1 and V2 revisions.
+
+### Step 1
+
+Plug in one display with a USB data cable and run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Homard-Simpson/coinbase-amoled-terminal/v2.0.0/install.sh | bash -s -- --version v2.0.0
+```
+
+The installer requires Python 3.11+ and Git. It finds exactly one likely USB
+serial device, creates an isolated Python/esptool environment, verifies a
+versioned release manifest and every SHA-256 artifact, installs the local bridge
+without Docker or administrator access, flashes only declared firmware regions,
+and writes a short-lived setup session to the dedicated onboarding partition.
+It does not erase unrelated NVS.
+
+If the existing device contains an official image whose exact flash hash appears
+in the release manifest, that trusted hash identifies V1 or V2. No other USB,
+chip, flash-size, serial-name, or hardware-probe signal is accepted. When a blank
+or DIY board cannot be identified, the installer asks once for V1 or V2 and links
+to the vendor's visual guide. It selects neither by default and fails closed in
+non-interactive mode.
+
+### Step 2
+
+Join the protected setup Wi-Fi shown on the display. Its captive portal asks for
+home Wi-Fi and the downloaded Coinbase CDP ECDSA JSON. Press **Finish**.
+
+Portal JavaScript sends that Coinbase JSON directly from the browser to an
+authenticated localhost-only endpoint on this computer. It is never submitted
+to `/save`, and the ESP cannot read it. The localhost bridge validates P-256
+key material, calls `/key_permissions`, refuses trade or transfer capability,
+then atomically stores the key name and private PEM in an owner-only credential
+bundle. A failed validation stores nothing.
+
+The browser sends the ESP only home Wi-Fi, the local feed URL, a UUIDv4 device
+ID, and a random revocable `cbat_` token. The setup and CSRF tokens are
+short-lived, single-use, and carried in request headers—not URLs. The local
+service binds only to `127.0.0.1`, accepts only exact portal/localhost origins and
+CORS/PNA preflights, and uses no cookies, external assets, analytics, autocomplete,
+or browser storage. If a captive mini-browser blocks localhost, the portal opens
+a same-computer localhost fallback page backed by the same session. See
+[Secure two-step onboarding](SECURE_ONBOARDING.md) for the complete boundary.
+
+The installer writes these per-user components:
+
+- macOS application data under `~/Library/Application Support/`, plus a LaunchAgent
+  under `~/Library/LaunchAgents/`;
+- Linux application data under `${XDG_DATA_HOME:-~/.local/share}` and a systemd
+  user unit under `${XDG_CONFIG_HOME:-~/.config}/systemd/user/`; and
+- a convenience command at `~/.local/bin/coinbase-amoled-bridge` when that path is
+  available without replacing an existing file.
+
+If launchd or `systemd --user` cannot start, setup stops before provisioning the
+display and rolls back new local state. Fix the user service/session, then run the
+same install line again.
+
+Offline sample install from a checked-out source tree:
+
+```bash
+./install.sh --sample
+```
+
+Idempotent update: rerun the Step 1 command with a newer approved version. The
+installer refreshes its isolated environment and service template, validates the
+manifest before flashing, and never replaces a different command or modified
+checkout.
+
+Uninstall while retaining private state:
+
+```bash
+./install.sh --uninstall
+```
+
+Append `--purge` to that command to explicitly delete credentials, configuration,
+and device tokens too.
+
+Reviewers may use `--manifest-url` only with the explicit
+`--allow-unverified-test-artifacts` acknowledgement. **Source firmware builders:**
+continue with the advanced steps below and choose the exact V1 or V2 revision.
+
 ## 1. Choose a deployment
 
 Recommended order:
