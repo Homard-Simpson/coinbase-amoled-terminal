@@ -106,7 +106,7 @@ credentials, configuration, and device tokens.
   one-time setup metadata while leaving firmware installed. The USB recovery
   helper erases those same two data partitions only.
 
-## Actual interface
+## Actual interface — v2.0.0
 
 These are direct 368 × 448 framebuffer captures from the production firmware
 renderer using current public market data. They are not concepts or hand-designed
@@ -114,21 +114,21 @@ mockups. Account fields are hidden by the renderer's privacy mode.
 
 ### Live prices
 
-![Production prices page showing five public markets](docs/images/prices-page.png)
+![Production prices page showing five public markets](docs/images/prices-page-v2.0.0.png)
 
 Five public markets with live prices, short-window direction, a consolidated
 battery/status/12-hour-time header, and tap targets for expanded charts.
 
 ### Positions in privacy mode
 
-![Production positions page with account fields obfuscated](docs/images/positions-privacy-page.png)
+![Production positions page with account fields obfuscated](docs/images/positions-privacy-page-v2.0.0.png)
 
 The actual account page with portfolio, position, quantity, entry, P&L, and
 closed-position fields obfuscated before framebuffer output.
 
 ### BTC candles, BB20, and key levels
 
-![Production BTC candle chart with Bollinger bands and support and resistance](docs/images/btc-chart-bb20-levels.png)
+![Production BTC candle chart with Bollinger bands and support and resistance](docs/images/btc-chart-bb20-levels-v2.0.0.png)
 
 Real hourly BTC-USD candles with volume-weighted body widths, BB20 upper/lower and
 middle bands, live-price marker, muted left-axis prices, and public-data
