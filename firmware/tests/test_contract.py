@@ -195,6 +195,16 @@ class ContractTests(unittest.TestCase):
         self.assertIn("AXIS_BLUE=rgb(125,175,210)", main)
         self.assertEqual(main.count("format_axis_price(axis"), 2)
         self.assertEqual(main.count("chart_level_value(lo,hi,i,4)"), 2)
+        capture = (
+            ROOT.parent / "tools/framebuffer_capture/production_draw.inc"
+        ).read_text(encoding="utf-8")
+        geometry_pattern = r"int gx=(\d+),gy=top\+50,gw=(\d+);"
+        production_geometry = re.findall(geometry_pattern, main)
+        capture_geometry = re.findall(geometry_pattern, capture)
+        self.assertEqual(production_geometry, [("94", "242")])
+        self.assertEqual(capture_geometry, production_geometry)
+        gx, gw = map(int, production_geometry[0])
+        self.assertEqual(gx + gw, 336)
         self.assertIn("privacy_mode", main)
         self.assertIn('privacy_mode?"MARKET":"FLAT"', main)
         self.assertNotIn("#if !BOARD_IS_V1\n      draw_price_levels", main)

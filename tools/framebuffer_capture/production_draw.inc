@@ -39,8 +39,8 @@ static void draw(){
     text_bold(28,top+8,a.name,WHITE,3);
     fmt_money(b,sizeof(b),a.price); text(28+(int)strlen(a.name)*18+12,top+8,b,AMBER,3);
     double pct=chart_change_pct(a); snprintf(b,sizeof(b),"%+.2f%%",pct); text_right(340,top+14,b,pct>=0?GREEN:RED,2);
-    // Reserve a real left gutter for price labels; chart marks never draw there.
-    int gx=106,gy=top+50,gw=230; char t[80];
+    // Reserve a compact left gutter for price labels; chart marks never draw there.
+    int gx=94,gy=top+50,gw=242; char t[80];
     if(a.candle_count){
       // Volume candles: body width represents each candle's volume relative to
       // the highest-volume candle in the visible window. No separate volume bars.

@@ -8,6 +8,11 @@ public releases begin.
 
 ## [Unreleased]
 
+### Changed
+
+- Reduced the token-chart price-axis gutter and widened the plot area on both V1
+  and V2 without moving its right edge.
+
 ## [2.0.0] - 2026-08-02
 
 ### Added
