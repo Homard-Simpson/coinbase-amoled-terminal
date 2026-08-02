@@ -534,6 +534,13 @@ class ManifestTrustTests(unittest.TestCase):
                     firmware_version="1.2.3-v1",
                 )
 
+    def test_esp_image_accepts_bounded_esp32s3_fast_rtc_segment(self) -> None:
+        image = synthetic_esp_image(b"rtc-retained-state", load_address=0x600FE000)
+        FIRMWARE._validate_esp_image(image, image_name="application")
+        unsafe = synthetic_esp_image(b"outside-fast-rtc", load_address=0x60100000)
+        with self.assertRaisesRegex(FIRMWARE.FirmwareInstallError, "segment is unsafe"):
+            FIRMWARE._validate_esp_image(unsafe, image_name="application")
+
     def test_binary_secret_scan_rejects_real_key_blocks_and_private_hosts(self) -> None:
         private_key = (
             b"-----BEGIN "

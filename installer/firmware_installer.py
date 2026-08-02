@@ -903,7 +903,9 @@ def _validate_esp_image(payload: bytes, *, image_name: str) -> None:
         cursor += 8
         segment_end = cursor + data_length
         approved_address = (
-            0x3C000000 <= load_address < 0x44000000 or 0x50000000 <= load_address < 0x50010000
+            0x3C000000 <= load_address < 0x44000000
+            or 0x50000000 <= load_address < 0x50010000
+            or 0x600FE000 <= load_address < 0x60100000
         )
         if (
             not approved_address
