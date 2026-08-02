@@ -58,6 +58,7 @@ esp_timer_handle_t ota_timer = nullptr;
 TaskHandle_t dns_task = nullptr;
 int dns_socket = -1;
 volatile bool dns_running = false;
+std::atomic_bool ota_upload_active{false};
 
 class ScopedLock {
 public:
@@ -69,6 +70,11 @@ public:
     }
 private:
     SemaphoreHandle_t lock_;
+};
+
+class OtaUploadGuard {
+public:
+    ~OtaUploadGuard() { ota_upload_active = false; }
 };
 
 bool EndsWith(std::string_view value, std::string_view suffix) {
@@ -550,6 +556,11 @@ esp_err_t OtaHandler(httpd_req_t* req) {
         return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "Wrong one-time code");
     if (req->content_len < 1024 || static_cast<size_t>(req->content_len) > kMaxUploadBytes)
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid firmware size");
+    if (ota_upload_active.exchange(true)) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "OTA upload already active");
+    }
+    OtaUploadGuard upload_guard;
 
     const esp_partition_t* update = esp_ota_get_next_update_partition(nullptr);
     if (!update || static_cast<size_t>(req->content_len) > update->size)
@@ -665,6 +676,10 @@ void NetworkPortal::NotifyState() {
 bool NetworkPortal::HasSavedNetwork() const {
     ScopedLock guard(state_lock_);
     return !credentials.empty();
+}
+
+bool NetworkPortal::IsOtaBusy() const {
+    return ota_upload_active.load();
 }
 
 std::string NetworkPortal::GetApSsid() const {
@@ -794,6 +809,7 @@ void NetworkPortal::Initialize(std::function<void(bool)> connection_callback,
 void NetworkPortal::EventHandler(void* arg, const char* event_base, int32_t event_id,
                                  void*) {
     auto* self = static_cast<NetworkPortal*>(arg);
+    if (self->suspended_) return;
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START && self->HasSavedNetwork()) {
         self->ApplyCredential(0);
         esp_wifi_connect();
@@ -820,7 +836,7 @@ void NetworkPortal::EventHandler(void* arg, const char* event_base, int32_t even
 
 void NetworkPortal::ConnectionTimeout(void* arg) {
     auto* self = static_cast<NetworkPortal*>(arg);
-    if (!self->connected_) self->StartPortal();
+    if (!self->suspended_ && !self->connected_) self->StartPortal();
 }
 
 void NetworkPortal::OtaTimeout(void* arg) {
@@ -841,6 +857,7 @@ void NetworkPortal::ClosePortalTask(void* arg) {
 }
 
 void NetworkPortal::StartPortal() {
+    if (suspended_) return;
     if (portal_active_.exchange(true)) return;
     const RuntimeConfigSnapshot runtime = RuntimeConfig::GetInstance().Snapshot();
     const std::string suffix = runtime.device_id.size() >= 4
@@ -962,6 +979,27 @@ void NetworkPortal::ArmOta() {
     ESP_ERROR_CHECK(esp_timer_start_once(ota_timer, kOtaWindowSeconds * 1000000ULL));
     NotifyState();
     ESP_LOGW(kTag, "physical OTA window armed for %d seconds", kOtaWindowSeconds);
+}
+
+void NetworkPortal::Suspend() {
+    if (suspended_.exchange(true)) return;
+    resume_portal_ = portal_active_.load();
+    if (connection_timer) esp_timer_stop(connection_timer);
+    if (portal_active_) StopPortal();
+    const esp_err_t err = esp_wifi_stop();
+    const bool was_connected = connected_.exchange(false);
+    if (was_connected && connection_callback_) connection_callback_(false);
+    NotifyState();
+    ESP_LOGI(kTag, "Wi-Fi stopped for POWER standby (%s)", esp_err_to_name(err));
+}
+
+void NetworkPortal::Resume() {
+    if (!suspended_.exchange(false)) return;
+    const bool restore_portal = resume_portal_.exchange(false);
+    const esp_err_t err = esp_wifi_start();
+    if (err == ESP_OK && restore_portal) StartPortal();
+    NotifyState();
+    ESP_LOGI(kTag, "Wi-Fi resumed after POWER standby (%s)", esp_err_to_name(err));
 }
 
 void NetworkPortal::CompletePendingSetup() {

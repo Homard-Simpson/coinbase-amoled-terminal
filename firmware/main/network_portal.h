@@ -14,6 +14,8 @@ public:
 
     void Initialize(std::function<void(bool)> connection_callback,
                     std::function<void()> state_callback);
+    void Suspend();
+    void Resume();
     void ArmOta();
     void CompletePendingSetup();
     esp_err_t SaveCredential(const std::string& ssid, const std::string& password);
@@ -21,6 +23,7 @@ public:
     bool IsConnected() const { return connected_.load(); }
     bool IsPortalActive() const { return portal_active_.load(); }
     bool IsOtaArmed() const { return ota_armed_.load(); }
+    bool IsOtaBusy() const;
     bool HasSavedNetwork() const;
     std::string GetApSsid() const;
     std::string GetApPassword() const;
@@ -49,6 +52,8 @@ private:
     std::atomic_bool connected_{false};
     std::atomic_bool portal_active_{false};
     std::atomic_bool ota_armed_{false};
+    std::atomic_bool suspended_{false};
+    std::atomic_bool resume_portal_{false};
     size_t credential_index_ = 0;
     mutable SemaphoreHandle_t state_lock_ = nullptr;
     std::string ap_ssid_;

@@ -202,11 +202,11 @@ exit 91
         self.assertIn("-m pip --isolated install", script)
         self.assertIn("--index-url https://pypi.org/simple", script)
 
-    def test_readme_frontloads_two_steps_but_blocks_public_release(self) -> None:
+    def test_readme_frontloads_version_pinned_two_step_release(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         public_command = (
             "curl -fsSL https://raw.githubusercontent.com/Homard-Simpson/"
-            "coinbase-amoled-terminal/main/install.sh | bash"
+            "coinbase-amoled-terminal/v2.0.0/install.sh | bash -s -- --version v2.0.0"
         )
         self.assertIn(
             "Your Coinbase account, on a tiny screen. Your key stays on your computer. "
@@ -215,9 +215,9 @@ exit 91
         )
         self.assertEqual(readme.count("## Step 1 —"), 1)
         self.assertEqual(readme.count("## Step 2 —"), 1)
-        self.assertIn("./install.sh --version vX.Y.Z", readme)
-        self.assertIn("public one-line install is deliberately disabled", readme)
-        self.assertNotIn(public_command, readme)
+        self.assertIn(public_command, readme)
+        self.assertNotIn("coinbase-amoled-terminal/main/install.sh | bash", readme)
+        self.assertIn("immutable and signed", readme)
         self.assertLess(readme.index("## Step 1"), readme.index("## Step 2"))
         self.assertLess(readme.index("## Step 2"), readme.index("## Actual interface"))
 

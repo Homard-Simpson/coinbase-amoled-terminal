@@ -17,24 +17,21 @@ static void draw(){
     return;
   }
   uint64_t now=esp_timer_get_time()/1000; bool stale=!last_ok_ms||now-last_ok_ms>STALE_MS;
-  draw_battery(16,12);
+  draw_battery(16,10);
   bool feed_problem=feed_status!=ST_UPDATED&&feed_status!=ST_STARTING;
-  const char*page=selected_chart>=0?assets[selected_chart].name:(detail?"POSITIONS":"PRICES");
-  text_right(352,28,page,MUTED,2);
-  if(privacy_mode)text(124,8,"PRIVATE",AMBER,2);
-  // Prices stream live (~2s), so there is no refresh countdown to show. Only warn
-  // in the corner when the feed actually goes stale or offline.
+  char status[24]{};
   if(stale||!wifi_up||feed_problem){
-    if(stale)snprintf(b,sizeof(b),"STALE");
-    else if(!wifi_up)snprintf(b,sizeof(b),"OFFLINE");
-    else if(feed_status==ST_HTTPERR)snprintf(b,sizeof(b),"HTTP %d",feed_http_code);
-    else if(feed_status==ST_JSONERR)snprintf(b,sizeof(b),"JSON ERR");
-    else if(feed_status==ST_UNSAFE)snprintf(b,sizeof(b),"UNSAFE");
-    else if(feed_status==ST_ACCOUNT_STALE)snprintf(b,sizeof(b),"ACCT STALE");
-    else if(feed_status==ST_NOWIFI)snprintf(b,sizeof(b),"NO WIFI");
-    else snprintf(b,sizeof(b),"FEED ERR");
-    text_right(352,8,b,AMBER,2);
-  }
+    if(stale)snprintf(status,sizeof(status),"STALE");
+    else if(!wifi_up)snprintf(status,sizeof(status),"OFFLINE");
+    else if(feed_status==ST_HTTPERR)snprintf(status,sizeof(status),"HTTP %d",feed_http_code);
+    else if(feed_status==ST_JSONERR)snprintf(status,sizeof(status),"JSON ERR");
+    else if(feed_status==ST_UNSAFE)snprintf(status,sizeof(status),"UNSAFE");
+    else if(feed_status==ST_ACCOUNT_STALE)snprintf(status,sizeof(status),"ACCT STALE");
+    else if(feed_status==ST_NOWIFI)snprintf(status,sizeof(status),"NO WIFI");
+    else snprintf(status,sizeof(status),"FEED ERR");
+  } else if(privacy_mode)snprintf(status,sizeof(status),"PRIVATE");
+  if(status[0])text_center(120,132,12,status,AMBER,2);
+  text_right(352,12,display_time.c_str(),AXIS_BLUE,2);
   int top=58;
   if(selected_chart>=0){
     auto&a=assets[selected_chart];
@@ -42,7 +39,8 @@ static void draw(){
     text_bold(28,top+8,a.name,WHITE,3);
     fmt_money(b,sizeof(b),a.price); text(28+(int)strlen(a.name)*18+12,top+8,b,AMBER,3);
     double pct=chart_change_pct(a); snprintf(b,sizeof(b),"%+.2f%%",pct); text_right(340,top+14,b,pct>=0?GREEN:RED,2);
-    int gx=32,gy=top+50,gw=304; char t[80];
+    // Reserve a real left gutter for price labels; chart marks never draw there.
+    int gx=106,gy=top+50,gw=230; char t[80];
     if(a.candle_count){
       // Volume candles: body width represents each candle's volume relative to
       // the highest-volume candle in the visible window. No separate volume bars.
@@ -65,7 +63,7 @@ static void draw(){
       else {double pad=range*0.04;lo-=pad;hi+=pad;}
       // Entry no longer forces the scale; see entry_in_view for the near-range policy.
       bool show_entry=!privacy_mode&&a.pos.open&&entry_in_view(a.pos.entry,lo,hi);
-      for(int i=0;i<=4;i++){int yy=gy+price_h*i/4;draw_line(gx,yy,gx+gw-1,yy,GRID);}
+      for(int i=0;i<=4;i++){int yy=gy+price_h*i/4;draw_line(gx,yy,gx+gw-1,yy,GRID);char axis[16];format_axis_price(axis,sizeof(axis),chart_level_value(lo,hi,i,4));text_right(gx-8,yy-7,axis,AXIS_BLUE,2);}
       auto py=[&](double v){double n=(v-lo)/(hi-lo);n=std::max(0.0,std::min(1.0,n));return gy+price_h-1-(int)lround(n*(price_h-1));};
       auto px=[&](int i){return gx+((2*i+1)*gw)/(2*a.candle_count);};
       bool any_band=false;
@@ -114,7 +112,7 @@ static void draw(){
       if(fabs(hi-lo)<1e-9){double pad=std::max(fabs(hi)*0.0005,1e-6);lo-=pad;hi+=pad;}
       // Same policy as the candle chart: entry never forces the scale.
       bool show_entry=!privacy_mode&&hb&&a.pos.open&&entry_in_view(a.pos.entry,lo,hi);
-      for(int i=0;i<=4;i++){int yy=gy+gh*i/4;draw_line(gx,yy,gx+gw-1,yy,GRID);}
+      for(int i=0;i<=4;i++){int yy=gy+gh*i/4;draw_line(gx,yy,gx+gw-1,yy,GRID);char axis[16];format_axis_price(axis,sizeof(axis),chart_level_value(lo,hi,i,4));text_right(gx-8,yy-7,axis,AXIS_BLUE,2);}
       auto py=[&](double v){double n=(v-lo)/(hi-lo);n=std::max(0.0,std::min(1.0,n));return gy+gh-1-(int)lround(n*(gh-1));};
       if(show_entry){int ey=py(a.pos.entry);for(int X=gx;X<gx+gw;X+=10)draw_line(X,ey,std::min(X+4,gx+gw-1),ey,AMBER);text(gx+2,ey-16,"ENTRY",AMBER,2);}
       if(a.history_count>=2){
@@ -132,13 +130,13 @@ static void draw(){
   } else if(detail){
     // Portfolio summary now lives only on the POSITIONS page.
     rect(16,top,336,64,CARD);
-    text(28,top+8,"PORTFOLIO",MUTED,2);
+    text(28,top+8,"OPEN VALUE",MUTED,2);
     if(privacy_mode){
       text(28,top+32,"$********",WHITE,3);
       text_right(340,top+8,"UPL ********",MUTED,2);
       text_right(340,top+40,"RPL ********",MUTED,2);
     } else {
-      fmt_money(b,sizeof(b),balance); text(28,top+32,b,WHITE,3);
+      fmt_money(b,sizeof(b),position_value); text(28,top+32,b,WHITE,3);
       snprintf(b,sizeof(b),"UPL %+.2f",total_pnl); text_right(340,top+8,b,total_pnl>=0?GREEN:RED,2);
       snprintf(b,sizeof(b),"RPL %+.2f",realized_pnl_today); text_right(340,top+40,b,realized_pnl_today>=0?GREEN:RED,2);
     }

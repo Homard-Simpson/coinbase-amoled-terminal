@@ -137,9 +137,34 @@ class ContractTests(unittest.TestCase):
 
     def test_physical_button_contract_and_v2_pmu_guard_are_unchanged(self):
         main = (ROOT / "main/main.cc").read_text(encoding="utf-8")
-        self.assertIn("now-button_at>=10000", main)
-        self.assertIn("held>=800", main)
-        self.assertNotIn("held>=750", main)
+        controls = (ROOT / "main/control_policy.h").read_text(encoding="utf-8")
+        portal_h = (ROOT / "main/network_portal.h").read_text(encoding="utf-8")
+        portal_cc = (ROOT / "main/network_portal.cc").read_text(encoding="utf-8")
+        ota_h = (ROOT / "main/auto_ota_v2.h").read_text(encoding="utf-8")
+        ota_cc = (ROOT / "main/auto_ota_v2.cc").read_text(encoding="utf-8")
+
+        self.assertIn("kBootPrivacyHoldMs = 800", controls)
+        self.assertIn("kBootOtaHoldMs = 10000", controls)
+        self.assertIn("kPowerPollSliceUs = 250000", controls)
+        self.assertIn("activate_bottom_action", controls)
+        self.assertIn("axp_runtime_write_allowed", controls)
+        self.assertIn("boot_should_arm_ota", main)
+        self.assertIn("boot_release_action", main)
+        self.assertIn("activate_bottom_action(selected_chart,detail)", main)
+        self.assertIn("POWER short=standby/wake", main)
+        self.assertIn("BOOT 0.8-<10s=privacy", main)
+        self.assertNotIn("set_screen(!screen_on)", main)
+        self.assertIn("void Suspend();", portal_h)
+        self.assertIn("void Resume();", portal_h)
+        self.assertIn("void NetworkPortal::Suspend()", portal_cc)
+        self.assertIn("void NetworkPortal::Resume()", portal_cc)
+        self.assertIn("bool IsOtaBusy() const;", portal_h)
+        self.assertIn("ota_upload_active.exchange(true)", portal_cc)
+        self.assertIn("network.IsOtaArmed()||network.IsOtaBusy()", main)
+        self.assertIn("PauseV2AutomaticOtaForStandby(20000)", main)
+        self.assertIn("PauseV2AutomaticOtaForStandby", ota_h)
+        self.assertIn("xSemaphoreTake(ota_gate", ota_cc)
+        self.assertIn("xSemaphoreGive(ota_gate)", ota_cc)
         self.assertIn("#if BOARD_IS_V1", main)
         v1_start = main.index("static const uint8_t axp_seq")
         v2_boundary = main.index("#else", v1_start)
@@ -153,8 +178,11 @@ class ContractTests(unittest.TestCase):
         self.assertNotIn(
             "i2c_master_transmit", main[v2_boundary : main.index("#endif", v2_boundary)]
         )
+        self.assertIn("reg=0x41", main)
+        self.assertIn("reg=0x49", main)
+        self.assertNotIn("axp_irq_write(0x48", main)
 
-    def test_forward_ui_has_single_clock_row_and_subtle_chart_price_levels(self):
+    def test_both_variants_share_single_clock_row_privacy_and_chart_price_levels(self):
         main = (ROOT / "main/main.cc").read_text(encoding="utf-8")
         bridge = (
             ROOT.parent
@@ -163,14 +191,16 @@ class ContractTests(unittest.TestCase):
 
         self.assertIn('static std::string display_time="--:-- --"', main)
         self.assertIn("valid_display_time", main)
-        self.assertIn("text_right(352,14,display_time.c_str(),WHITE,2)", main)
-        self.assertIn("#if BOARD_IS_V1\n  const char*page=selected_chart", main)
-        self.assertIn("#else\n  // V2 uses one clean top row", main)
-        self.assertIn("LIGHT_BLUE=rgb(105,181,235)", main)
-        self.assertEqual(main.count("draw_price_levels(gx-8"), 2)
-        self.assertIn("#if !BOARD_IS_V1\n      draw_price_levels", main)
+        self.assertIn("text_right(352,12,display_time.c_str(),AXIS_BLUE,2)", main)
+        self.assertIn("AXIS_BLUE=rgb(125,175,210)", main)
+        self.assertEqual(main.count("format_axis_price(axis"), 2)
+        self.assertEqual(main.count("chart_level_value(lo,hi,i,4)"), 2)
+        self.assertIn("privacy_mode", main)
+        self.assertIn('privacy_mode?"MARKET":"FLAT"', main)
+        self.assertNotIn("#if !BOARD_IS_V1\n      draw_price_levels", main)
         self.assertIn("display_time", bridge)
         self.assertIn('suffix = "AM" if now.hour < 12 else "PM"', bridge)
+        self.assertIn('f"{hour:02d}:{now.minute:02d} {suffix}"', bridge)
 
     def test_v2_automatic_ota_is_signed_forward_only_and_v1_excluded(self):
         main = (ROOT / "main/main.cc").read_text(encoding="utf-8")
@@ -193,6 +223,8 @@ class ContractTests(unittest.TestCase):
         self.assertIn("esp_ota_set_boot_partition", ota)
         self.assertIn("ConstantTimeEqual(digest.data()", ota)
         self.assertIn("portal.IsPortalActive() || portal.IsOtaArmed()", ota)
+        self.assertIn("PauseV2AutomaticOtaForStandby", ota)
+        self.assertIn("xSemaphoreCreateMutex", ota)
 
     def test_no_private_literals_or_publishable_artifacts(self):
         old_private_token_name = "coinbase" + "-epaper-token"

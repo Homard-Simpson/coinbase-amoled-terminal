@@ -33,6 +33,12 @@ command -v "$PYTHON" >/dev/null 2>&1 || {
 note "Public secret and privacy scan"
 "$PYTHON" scripts/scan_public_safety.py .
 
+note "Firmware host contracts"
+./firmware/tests/run.sh
+
+note "Interface capture reproduction"
+"$PYTHON" scripts/check-interface-captures.py
+
 note "Shell syntax"
 bash -n install.sh
 while IFS= read -r -d '' script; do

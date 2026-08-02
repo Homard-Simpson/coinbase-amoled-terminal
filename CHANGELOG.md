@@ -8,6 +8,8 @@ public releases begin.
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-08-02
+
 ### Added
 
 - Public-ready project documentation and governance policies.
@@ -38,7 +40,13 @@ public releases begin.
 - V2-only forward automatic OTA using the pinned Ed25519 release-manifest key,
   signed SHA-256/board/version checks, dual slots, and rollback.
 - A consolidated battery/time header and subtle left-side price levels on token
-  charts, with bridge-local time rendered in 12-hour AM/PM format.
+  charts for both board variants, with bridge-local time rendered in fixed-width
+  12-hour AM/PM format.
+- The production physical-control contract on both variants: POWER-only
+  standby/wake; BOOT short blue action; BOOT 0.8–<10 second privacy toggle; and
+  uninterrupted 10-second manual OTA arming.
+- Standby coordination that pauses feed/touch/Wi-Fi and prevents POWER from
+  interrupting an active signed V2 automatic update.
 
 ### Security
 
@@ -51,5 +59,3 @@ public releases begin.
   provisioning.
 - Installer scripts and service templates are included in shell, lint, test, and
   public-safety CI gates.
-
-No stable version has been released.

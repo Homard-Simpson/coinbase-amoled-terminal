@@ -75,10 +75,10 @@ def _spot_rank(position: dict[str, Any]) -> int:
     return 0 if position.get("position_type") == "spot" else 1
 
 
-def _display_time() -> str:
+def _display_time(now: datetime | None = None) -> str:
     """Return bridge-local wall time in a locale-independent 12-hour format."""
 
-    now = datetime.now().astimezone()
+    now = now or datetime.now().astimezone()
     hour = now.hour % 12 or 12
     suffix = "AM" if now.hour < 12 else "PM"
     return f"{hour:02d}:{now.minute:02d} {suffix}"

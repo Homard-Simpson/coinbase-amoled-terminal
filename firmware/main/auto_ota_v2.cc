@@ -20,6 +20,7 @@
 #include "esp_random.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "mbedtls/sha256.h"
 #include "network_portal.h"
@@ -54,6 +55,7 @@ constexpr std::array<uint8_t, crypto_sign_PUBLICKEYBYTES> kReleasePublicKey = {
     0x96, 0x1b, 0x32, 0xd2, 0x52, 0xb2, 0x7e, 0x34,
     0xfc, 0xe3, 0xd2, 0x7f, 0x4b, 0x40, 0x4f, 0xf2,
 };
+SemaphoreHandle_t ota_gate = nullptr;
 
 struct HttpBody {
     std::vector<char> bytes;
@@ -531,11 +533,15 @@ void AutomaticOtaTask(void*) {
     const uint32_t initial = kInitialDelaySeconds + esp_random() % (kInitialJitterSeconds + 1);
     vTaskDelay(pdMS_TO_TICKS(initial * 1000));
     while (true) {
-        auto& portal = NetworkPortal::GetInstance();
-        const bool eligible = portal.IsConnected() && !portal.IsPortalActive() &&
-                              !portal.IsOtaArmed() &&
-                              RuntimeConfig::GetInstance().IsProvisioned();
-        const bool checked = eligible && CheckForUpdate();
+        bool checked = false;
+        if (ota_gate && xSemaphoreTake(ota_gate, portMAX_DELAY) == pdTRUE) {
+            auto& portal = NetworkPortal::GetInstance();
+            const bool eligible = portal.IsConnected() && !portal.IsPortalActive() &&
+                                  !portal.IsOtaArmed() &&
+                                  RuntimeConfig::GetInstance().IsProvisioned();
+            checked = eligible && CheckForUpdate();
+            xSemaphoreGive(ota_gate);
+        }
         const uint32_t delay = checked ? kCheckIntervalSeconds : kRetrySeconds;
         vTaskDelay(pdMS_TO_TICKS(delay * 1000));
     }
@@ -547,6 +553,23 @@ void StartV2AutomaticOta() {
         ESP_LOGE(kTag, "cryptographic self-initialization failed; automatic OTA disabled");
         return;
     }
-    if (xTaskCreate(AutomaticOtaTask, "auto_ota_v2", 12288, nullptr, 3, nullptr) != pdPASS)
+    ota_gate = xSemaphoreCreateMutex();
+    if (!ota_gate) {
+        ESP_LOGE(kTag, "unable to create automatic OTA standby gate");
+        return;
+    }
+    if (xTaskCreate(AutomaticOtaTask, "auto_ota_v2", 12288, nullptr, 3, nullptr) != pdPASS) {
         ESP_LOGE(kTag, "unable to start automatic OTA task");
+        vSemaphoreDelete(ota_gate);
+        ota_gate = nullptr;
+    }
+}
+
+bool PauseV2AutomaticOtaForStandby(uint32_t timeout_ms) {
+    if (!ota_gate) return true;
+    return xSemaphoreTake(ota_gate, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+}
+
+void ResumeV2AutomaticOtaAfterStandby() {
+    if (ota_gate) xSemaphoreGive(ota_gate);
 }

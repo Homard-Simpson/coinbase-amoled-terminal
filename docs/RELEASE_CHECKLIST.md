@@ -67,6 +67,7 @@ board variants, the bridge, documentation, and publication artifacts pass review
 
 - [ ] Build V1 from clean state.
 - [ ] Build V2 from clean state.
+- [ ] Run `./firmware/tests/run.sh` and verify control/UI/PMU contracts pass.
 - [ ] Ensure artifact names contain the board variant and version.
 - [ ] Verify production provisioning was injected locally and generated headers
   were removed after each build.
@@ -89,8 +90,9 @@ board variants, the bridge, documentation, and publication artifacts pass review
 - [ ] FT5x06-family touch works across the screen.
 - [ ] Wi-Fi, HTTPS feed, stale/offline state, and reconnect pass.
 - [ ] Wired recovery and OTA rollback path are available.
-- [ ] BOOT short press, 0.8–10 second display/privacy toggle, and continuous 10 second OTA arming
-  match the documented production contract.
+- [ ] POWER short standby/wake; BOOT short blue action; BOOT 0.8–<10 second
+  privacy toggle; and continuous 10-second OTA arming match the documented
+  production contract.
 - [ ] Captive portal completes with a synthetic P-256 view-only test transport and
   clears the one-time onboarding partition after success.
 
@@ -101,9 +103,14 @@ board variants, the bridge, documentation, and publication artifacts pass review
 - [ ] CST816S/CST820-family touch works across the screen.
 - [ ] Wi-Fi, HTTPS feed, stale/offline state, and reconnect pass.
 - [ ] Wired recovery and OTA rollback path are available.
-- [ ] BOOT short press, 0.8–10 second display/privacy toggle, and continuous 10 second OTA arming
-  match the documented production contract.
-- [ ] Confirm no V1-only AXP2101 write occurs before, during, or after onboarding.
+- [ ] POWER short standby/wake; BOOT short blue action; BOOT 0.8–<10 second
+  privacy toggle; and continuous 10-second OTA arming match the documented
+  production contract.
+- [ ] Confirm V2 performs only the shared PWRKEY IRQ writes at runtime and no
+  V1-only AXP2101 rail write before, during, or after onboarding.
+- [ ] Verify a signed strictly newer V2 update installs, same/older/prerelease or
+  bad-signature artifacts fail closed, rollback works, and POWER standby cannot
+  interrupt an active automatic update.
 - [ ] Captive portal completes with a synthetic P-256 view-only test transport and
   clears the one-time onboarding partition after success.
 
@@ -114,6 +121,8 @@ board variants, the bridge, documentation, and publication artifacts pass review
 - [ ] Confirm commands do not contain user-specific paths or live endpoints.
 - [ ] Confirm interface images come from the actual renderer with only public or
   sanitized data, have documented provenance, and are metadata-stripped.
+- [ ] For every user-visible firmware change, update the public README and
+  regenerate interface screenshots when the rendered UI changed.
 - [ ] Update hardware matrix and troubleshooting notes.
 - [ ] Recheck trademark disclaimer and unofficial-project wording.
 

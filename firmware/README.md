@@ -9,7 +9,7 @@ The ESP never connects to Coinbase or stores exchange API keys. It performs one 
 | Build | Display | Touch | Power / reset |
 |---|---|---|---|
 | `v1` | SH8601 | FT5x06 / FT3168 | TCA9554 + AXP2101 |
-| `v2` | CO5300 | CST820 (CST816-compatible protocol) | TCA9554 reset; no AXP register writes |
+| `v2` | CO5300 | CST820 (CST816-compatible protocol) | TCA9554 reset + narrow AXP PWRKEY IRQ access; no V1 rail writes |
 
 Choose the revision before flashing. The images are not interchangeable. OTA checks the project name and `-v1`/`-v2` version suffix to prevent accidental cross-flashing.
 
@@ -22,9 +22,13 @@ Choose the revision before flashing. The images are not interchangeable. OTA che
 - Entry and live-price guide lines, subtle light-blue left-side chart levels, list sparklines, and closed-today rows.
 - A single top row with battery/charge state at left and bridge-local current time at right in 12-hour AM/PM format.
 - Dedicated 10 ms touch task so network requests and frame transfers do not drop taps.
-- **Short BOOT press:** toggle Prices / Positions (or leave a chart).
-- **BOOT hold 0.8-10 seconds:** display off/on (privacy/standby).
-- **BOOT hold continuously for 10 seconds:** wake the display and arm local OTA for five minutes.
+- **Short POWER/PWRKEY press:** enter standby; a second POWER press wakes. The
+  panel, feed/touch workers, and Wi-Fi pause while RAM/UI state is retained.
+- **Short BOOT press:** activate the current blue bottom action (toggle Prices /
+  Positions, or leave a chart).
+- **BOOT release after 0.8 to under 10 seconds:** toggle privacy mode.
+- **BOOT hold continuously for 10 seconds:** arm local OTA for five minutes
+  without also toggling privacy.
 
 ## Security model
 
@@ -36,7 +40,10 @@ Choose the revision before flashing. The images are not interchangeable. OTA che
 - HTTPS uses the ESP-IDF certificate bundle. Plain HTTP is accepted only for RFC1918, link-local, loopback, CGNAT/tailnet, `.local`, `.lan`, `.home.arpa`, `.internal`, or single-label LAN hosts.
 - Feed bodies are capped at 192 KiB. Candle storage is capped at 36 per symbol; closed-today storage is capped at 20 rows.
 - The entire response is rejected unless `read_only` is the JSON boolean `true`. Missing, `false`, string, or numeric values fail closed and do not replace the last trusted state.
-- Manual OTA requires physical presence plus a six-digit one-time code. V2 also checks the official latest-release endpoint in the background and accepts only a strictly newer stable V2 application whose SHA-256 is bound to a production-ready Ed25519-signed manifest. Both paths use dual slots and ESP-IDF rollback. This protects network updates, but it is not a substitute for hardware Secure Boot against a physical attacker.
+- Manual OTA requires physical presence plus a six-digit one-time code. V2 also checks the official latest-release endpoint in the background and accepts only a strictly newer stable V2 application whose SHA-256 is bound to a production-ready Ed25519-signed manifest. POWER standby takes an updater gate first, so Wi-Fi cannot be stopped during an authenticated inactive-slot write; manual-OTA arming likewise defers standby. Both update paths use dual slots and ESP-IDF rollback. This protects network updates, but it is not a substitute for hardware Secure Boot against a physical attacker.
+- Runtime AXP2101 writes on both boards are restricted to enabling and consuming
+  the physical PWRKEY short-press interrupt (`0x41` bit 3 and `0x49 = 0x08`).
+  V1-only rail sequencing remains compile-time isolated from V2.
 
 The NVS token is a revocable **bridge credential**, not a Coinbase credential. Never paste Coinbase API keys, API secrets, private keys, or session cookies into the portal.
 
@@ -144,14 +151,14 @@ Compact candles use `[timestamp, open, high, low, close, volume]`. Object candle
 
 ### Automatic V2 updates
 
-After a randomized startup delay, V2 checks the official GitHub latest-release endpoint every six hours. It installs only when the release manifest and detached Ed25519 signature authenticate under the pinned release key, all production/control/V2-hardware readiness flags are true, the release is a strictly newer stable semantic version, and the downloaded V2 application matches the signed size, SHA-256, project, board suffix, and app version. Redirects are permitted only in this signed-download path; an altered payload cannot pass the pinned signature and digest checks. Failed checks or transfers leave the current slot selected, and ESP-IDF rollback remains enabled.
+After a randomized startup delay, V2 checks the official GitHub latest-release endpoint every six hours. It installs only when the release manifest and detached Ed25519 signature authenticate under the pinned release key, all production/control/V2-hardware readiness flags are true, the release is a strictly newer stable semantic version, and the downloaded V2 application matches the signed size, SHA-256, project, board suffix, and app version. Redirects are permitted only in this signed-download path; an altered payload cannot pass the pinned signature and digest checks. Failed checks or transfers leave the current slot selected, and ESP-IDF rollback remains enabled. POWER standby waits for the updater gate and stays awake rather than interrupting an active check/write.
 
 V1 does not compile or run the automatic updater. Prereleases and same/older versions are never installed automatically.
 
 ### Manual recovery/update
 
 1. Build the image for the device revision.
-2. Hold BOOT continuously for 10 seconds. The display wakes and shows a six-digit code for five minutes.
+2. While the display is awake, hold BOOT continuously for 10 seconds. The display shows a six-digit code for five minutes.
 3. Join the displayed setup AP, open `http://192.168.4.1`, choose `coinbase_amoled_terminal.bin`, and enter the code.
 4. The firmware verifies project identity, board suffix, size, and complete ESP-IDF image before selecting the inactive slot and restarting.
 

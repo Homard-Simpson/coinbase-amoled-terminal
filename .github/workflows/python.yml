@@ -55,6 +55,9 @@ jobs:
       - name: Check formatting
         run: python -m ruff format --check bridge installer scripts tests
 
+      - name: Verify interface captures are current
+        run: python scripts/check-interface-captures.py
+
       - name: Test repository
         run: python -m pytest -q
 

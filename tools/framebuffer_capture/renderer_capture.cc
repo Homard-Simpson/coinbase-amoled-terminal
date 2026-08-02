@@ -2,7 +2,8 @@
 //
 // The drawing primitives, palette, state structs, and draw() implementation below
 // are copied from the production ESP32 renderer. Hardware-only services are stubbed:
-// the setup portal is inactive, time/feed state are healthy, and flush_frame writes
+// the setup portal is inactive, feed state is healthy, bridge-local time is fixed,
+// and flush_frame writes
 // the exact 368x448 RGB565 framebuffer instead of sending it to the panel.
 #include <algorithm>
 #include <cmath>
@@ -15,6 +16,7 @@
 
 #include "bollinger_bands.h"
 #include "key_levels.h"
+#include "../../firmware/main/ui_helpers.h"
 #define PROGMEM
 #include "glcdfont.h"
 
@@ -27,6 +29,7 @@ static bool wifi_up=true, detail=false;
 static int selected_chart=-1;
 static uint32_t history_sample_seconds=3600;
 static uint64_t last_ok_ms=10000;
+static std::string display_time="09:41 PM";
 static int px_row_y[5],px_row_h[5],px_row_asset[5],px_row_n=0;
 enum { ST_STARTING=0, ST_UPDATED, ST_NOWIFI, ST_HTTPERR, ST_JSONERR, ST_UNSAFE, ST_ACCOUNT_STALE };
 static int feed_status=ST_UPDATED, feed_http_code=0;
@@ -43,7 +46,7 @@ struct Asset {
 };
 static Asset assets[]={Asset("BTC"),Asset("SOL"),Asset("XLM"),Asset("HYPE"),Asset("ETH")};
 static std::vector<ClosedPosition> closed_today;
-static double balance=0, total_pnl=0, realized_pnl_today=0;
+static double position_value=0, total_pnl=0, realized_pnl_today=0;
 struct Battery { bool present=false; int level=0; bool charging=false, done=false, vbus=false; };
 static Battery g_batt;
 
@@ -65,7 +68,7 @@ static void flush_frame(){
 }
 
 static uint16_t rgb(uint8_t r,uint8_t g,uint8_t b){ return __builtin_bswap16(((r&0xF8)<<8)|((g&0xFC)<<3)|(b>>3)); }
-static const uint16_t BLACK=rgb(5,8,15),CARD=rgb(18,24,38),GRID=rgb(45,57,78),MUTED=rgb(190,198,214),WHITE=rgb(245,247,250),GREEN=rgb(48,209,88),RED=rgb(255,69,58),BLUE=rgb(55,126,255),AMBER=rgb(255,180,0),BB_UPPER=rgb(55,220,255),BB_LOWER=rgb(180,105,255),BB_MIDDLE=rgb(105,125,155);
+static const uint16_t BLACK=rgb(5,8,15),CARD=rgb(18,24,38),GRID=rgb(45,57,78),MUTED=rgb(190,198,214),WHITE=rgb(245,247,250),GREEN=rgb(48,209,88),RED=rgb(255,69,58),BLUE=rgb(55,126,255),AMBER=rgb(255,180,0),BB_UPPER=rgb(55,220,255),BB_LOWER=rgb(180,105,255),BB_MIDDLE=rgb(105,125,155),AXIS_BLUE=rgb(125,175,210);
 static void rect(int x,int y,int w,int h,uint16_t c){ x=std::max(0,x); y=std::max(0,y); w=std::min(w,W-x); h=std::min(h,H-y); for(int yy=y;yy<y+h;yy++) std::fill(fb+yy*W+x,fb+yy*W+x+w,c); }
 static int text_width(const char*s,int scale=2){ scale=std::max(2,scale); return (int)strlen(s)*6*scale; }
 static void text(int x,int y,const char*s,uint16_t c,int scale=2){ scale=std::max(2,scale); for(;*s;s++,x+=6*scale){ unsigned ch=(unsigned char)*s; if(ch<32||ch>127) ch='?'; for(int i=0;i<5;i++){ uint8_t col=font[ch*5+i]; for(int j=0;j<8;j++) if(col&(1<<j)) rect(x+i*scale,y+j*scale,scale,scale,c); } } }

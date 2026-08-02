@@ -31,8 +31,20 @@ env:
   FIRMWARE_RELEASE_VERSION: 0.0.0-ci
 
 jobs:
+  host-tests:
+    name: Firmware host contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run deterministic firmware host tests
+        run: ./firmware/tests/run.sh
+
   build:
     name: Build ${{ matrix.variant }}
+    needs: host-tests
     runs-on: ubuntu-latest
     timeout-minutes: 35
     strategy:

@@ -100,9 +100,18 @@ The firmware:
   feed token;
 - polls the fixed read-only feed route;
 - validates HTTP status, size, schema version, types, and numeric bounds;
-- renders last-known-good data with clear stale/offline states; and
+- renders last-known-good data with clear stale/offline states, bridge-local
+  fixed-width 12-hour time, privacy mode, and muted chart-axis prices;
 - selects V1 or V2 hardware support at build time;
-- on V2 only, periodically authenticates the production-ready latest release with the pinned Ed25519 manifest key and installs only a strictly newer stable V2 application after signed size, SHA-256, project, version, and board checks.
+- maps POWER short press to coordinated standby/wake and BOOT to the current blue
+  action, privacy, or manual OTA based on exact hold duration; and
+- on V2 only, periodically authenticates the production-ready latest release with
+  the pinned Ed25519 manifest key and installs only a strictly newer stable V2
+  application after signed size, SHA-256, project, version, and board checks.
+
+POWER standby takes the V2 updater gate before pausing Wi-Fi, feed, touch, and
+the panel. It waits or remains awake instead of interrupting an inactive-slot
+write. V1 does not compile the automatic updater.
 
 It never receives a Coinbase API key and has no code path for order or transfer
 operations.
@@ -118,8 +127,8 @@ operations.
 | USB flasher ↔ display hardware | Accepted manifest and explicit board identity | Ambiguous or wrong V1/V2 selection | Exact firmware-hash detection or no-default human choice; approved offsets only |
 | Captive browser ↔ localhost onboarding | Short-lived loopback session | Captive portal and other browser origins | Exact Origin/CORS/PNA, bearer + CSRF binding, bounded single-use requests |
 | Localhost onboarding ↔ ESP portal | Browser-held safe provisioning response | Any field that could contain a Coinbase key | Independent allowlisted `/save` form; unknown/duplicate/private-key fields rejected |
-| Firmware ↔ display hardware | Selected board variant | Incorrect revision or electrical assumptions | Explicit build selector, clean dual builds, V2 compile guard against AXP writes |
-| Display ↔ nearby people | Operator | Anyone with visual or physical access | Minimal data, screen-off control, NVS erase |
+| Firmware ↔ display hardware | Selected board variant | Incorrect revision or electrical assumptions | Explicit build selector, clean dual builds, V2 compile guard against V1 rail writes, narrow shared PWRKEY IRQ allowlist |
+| Display ↔ nearby people | Operator | Anyone with visual or physical access | Minimal data, privacy mode, POWER standby, NVS erase |
 
 ## Feed contract
 
@@ -238,7 +247,11 @@ The firmware source is shared, but hardware-specific code is selected explicitly
 - `v1`: SH8601 display and FT5x06-family touch path, including required V1 power
   sequencing;
 - `v2`: CO5300 display and CST816S/CST820-family touch path, avoiding V1-only PMU
-  writes.
+  rail writes.
+
+Both builds use only AXP2101 `0x41` bit-3 enable and `0x49 = 0x08` write-one-to-
+clear at runtime for the physical PWRKEY short-press event. The allowlist cannot
+address rail-control registers `0x80` through `0x99`.
 
 CI builds both variants from clean state without credentials or per-device
 provisioning. Release artifacts are board-specific and accompanied by a manifest

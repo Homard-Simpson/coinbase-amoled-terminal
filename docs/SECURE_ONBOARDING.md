@@ -188,9 +188,10 @@ NVS region.
 - **Uninstall:** removes the user service and application. Private data is retained
   unless `--purge` is explicitly supplied.
 
-The physical BOOT contract is unchanged: a short press toggles the view, a
-0.8–10 second hold toggles the display, and a continuous 10 second hold wakes the display and
-arms local OTA for five minutes.
+The physical controls remain separate: POWER short press enters/wakes standby;
+BOOT short activates the current blue bottom action; BOOT release after 0.8 to
+under 10 seconds toggles privacy; and an uninterrupted 10-second BOOT hold arms
+local OTA for five minutes without toggling privacy.
 
 ## Verification boundary and current release status
 

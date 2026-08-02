@@ -3,10 +3,11 @@ from __future__ import annotations
 import copy
 import json
 import unittest
+from datetime import UTC, datetime
 from typing import Any
 
 from coinbase_amoled_bridge.config import default_config
-from coinbase_amoled_bridge.device_feed import to_device_feed
+from coinbase_amoled_bridge.device_feed import _display_time, to_device_feed
 from coinbase_amoled_bridge.feed import SampleFeedService
 
 # Fields that would disclose cash or whole-account value and must never reach the
@@ -53,6 +54,17 @@ def _rich_with_positions(positions: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 class DeviceFeedProjectionTests(unittest.TestCase):
+    def test_display_time_is_fixed_width_at_midnight_noon_and_evening(self) -> None:
+        self.assertEqual(
+            _display_time(datetime(2026, 8, 2, 0, 5, tzinfo=UTC)), "12:05 AM"
+        )
+        self.assertEqual(
+            _display_time(datetime(2026, 8, 2, 12, 30, tzinfo=UTC)), "12:30 PM"
+        )
+        self.assertEqual(
+            _display_time(datetime(2026, 8, 2, 21, 7, tzinfo=UTC)), "09:07 PM"
+        )
+
     def test_sample_feed_projects_to_numeric_compact_contract(self) -> None:
         settings = copy.deepcopy(default_config()["settings"])
         rich = SampleFeedService(settings, clock=lambda: 1_700_005_000).get_feed()

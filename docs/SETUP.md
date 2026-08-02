@@ -5,17 +5,15 @@ This guide describes a safe baseline. Component-specific flags may evolve before
 
 ## Consumer setup: two steps
 
-> **Release block:** this exact flow is implemented for review, but production
-> firmware manifests have not been published. Do not use or advertise the public
-> one-line installer until V1 and V2 hardware verification is complete.
+> **Current stable release:** `v2.0.0`, signed and hardware-verified for both
+> Waveshare V1 and V2 revisions.
 
 ### Step 1
 
-Plug in one display with a USB data cable. For an approved firmware release, run
-one command from the checked-out installer:
+Plug in one display with a USB data cable and run:
 
 ```bash
-./install.sh --version vX.Y.Z
+curl -fsSL https://raw.githubusercontent.com/Homard-Simpson/coinbase-amoled-terminal/v2.0.0/install.sh | bash -s -- --version v2.0.0
 ```
 
 The installer requires Python 3.11+ and Git. It finds exactly one likely USB
@@ -86,8 +84,7 @@ Uninstall while retaining private state:
 Append `--purge` to that command to explicitly delete credentials, configuration,
 and device tokens too.
 
-The public one-line command remains disabled because approved release assets do
-not yet exist. Reviewers may use `--manifest-url` only with the explicit
+Reviewers may use `--manifest-url` only with the explicit
 `--allow-unverified-test-artifacts` acknowledgement. **Source firmware builders:**
 continue with the advanced steps below and choose the exact V1 or V2 revision.
 

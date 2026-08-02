@@ -20,6 +20,7 @@ idf_component_register(
     REQUIRES
         app_update
         esp_event
+        esp_hw_support
         esp_http_client
         esp_http_server
         esp_lcd
