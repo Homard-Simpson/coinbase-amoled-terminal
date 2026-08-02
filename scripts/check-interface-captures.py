@@ -43,9 +43,7 @@ def main() -> int:
             for name in (canonical_name, readme_name):
                 expected = ROOT / "docs" / "images" / name
                 if not expected.is_file():
-                    mismatches.append(
-                        f"missing committed image: {expected.relative_to(ROOT)}"
-                    )
+                    mismatches.append(f"missing committed image: {expected.relative_to(ROOT)}")
                 elif expected.read_bytes() != actual.read_bytes():
                     mismatches.append(
                         f"stale interface image: {expected.relative_to(ROOT)} "
