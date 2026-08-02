@@ -15,6 +15,7 @@ public:
     void Initialize(std::function<void(bool)> connection_callback,
                     std::function<void()> state_callback);
     void ArmOta();
+    void CompletePendingSetup();
     esp_err_t SaveCredential(const std::string& ssid, const std::string& password);
 
     bool IsConnected() const { return connected_.load(); }

@@ -109,14 +109,13 @@ bool ParsePayload(const char* payload, size_t length,
     for (cJSON* item = root->child; item; item = item->next) ++fields;
     cJSON* schema = UniqueField(root, "schema_version");
     cJSON* expiry = UniqueField(root, "expires_at");
-    bool valid = fields == 9 && cJSON_IsNumber(schema) && schema->valuedouble == 1 &&
+    bool valid = fields == 8 && cJSON_IsNumber(schema) && schema->valuedouble == 2 &&
                  cJSON_IsNumber(expiry) && std::isfinite(expiry->valuedouble) &&
                  expiry->valuedouble > 0 &&
                  expiry->valuedouble <=
                      static_cast<double>(std::numeric_limits<int64_t>::max()) &&
                  JsonString(root, "session_id", &metadata->session_id) &&
                  JsonString(root, "setup_token", &metadata->setup_token) &&
-                 JsonString(root, "completion_token", &metadata->completion_token) &&
                  JsonString(root, "csrf_token", &metadata->csrf_token) &&
                  JsonString(root, "endpoint_url", &metadata->endpoint_url) &&
                  JsonString(root, "local_page_url", &metadata->local_page_url) &&
@@ -128,7 +127,6 @@ bool ParsePayload(const char* payload, size_t length,
         std::string local_origin;
         valid = OpaqueValue(metadata->session_id) &&
                 OpaqueValue(metadata->setup_token) &&
-                OpaqueValue(metadata->completion_token) &&
                 OpaqueValue(metadata->csrf_token) &&
                 LoopbackUrl(metadata->endpoint_url, "/v1/onboarding", &endpoint_origin) &&
                 LoopbackUrl(metadata->local_page_url, local_path, &local_origin) &&
@@ -150,7 +148,7 @@ const esp_partition_t* FindPartition() {
 
 bool OnboardingMetadataSnapshot::IsAvailable() const {
     return !session_id.empty() && !setup_token.empty() &&
-           !completion_token.empty() && !csrf_token.empty() &&
+           !csrf_token.empty() &&
            !endpoint_url.empty() && !local_page_url.empty() && !bridge_url.empty();
 }
 

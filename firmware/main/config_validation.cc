@@ -258,12 +258,24 @@ bool DeviceId(std::string_view value) {
                                 value[19] == 'a' || value[19] == 'b');
 }
 
+bool PendingExpiry(std::string_view value, int64_t* parsed) {
+    if (value.empty() || value.size() > 10) return false;
+    int64_t result = 0;
+    for (char character : value) {
+        if (character < '0' || character > '9') return false;
+        result = result * 10 + static_cast<int64_t>(character - '0');
+    }
+    if (result <= 0) return false;
+    if (parsed) *parsed = result;
+    return true;
+}
+
 bool SafeProvisioningForm(std::string_view body, std::string* reason) {
     if (body.empty() || body.size() > 4096)
         return Fail(reason, "Provisioning request size is invalid");
     static const std::set<std::string> allowed = {
         "csrf", "setup_csrf", "ssid", "password", "bridge_url", "device_id",
-        "bridge_token"};
+        "bridge_token", "pending_token", "pending_expires_at"};
     std::set<std::string> seen;
     std::string decoded_body;
     if (!StrictUrlDecode(body, &decoded_body))
@@ -287,9 +299,15 @@ bool SafeProvisioningForm(std::string_view body, std::string* reason) {
         if (end == std::string_view::npos) break;
         start = end + 1;
     }
+    const bool active = seen.count("bridge_token") == 1 &&
+                        !seen.count("pending_token") &&
+                        !seen.count("pending_expires_at");
+    const bool pending = !seen.count("bridge_token") &&
+                         seen.count("pending_token") == 1 &&
+                         seen.count("pending_expires_at") == 1;
     if (!seen.count("ssid") || !seen.count("password") ||
         !seen.count("bridge_url") || !seen.count("device_id") ||
-        !seen.count("bridge_token"))
+        (!active && !pending))
         return Fail(reason, "Provisioning request is incomplete");
     if (reason) reason->clear();
     return true;

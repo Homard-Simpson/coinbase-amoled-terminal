@@ -26,6 +26,8 @@ LOGGER.addHandler(logging.NullHandler())
 MAX_REQUEST_TARGET = 2_048
 MAX_HEADER_BYTES = 16_384
 MAX_RESPONSE_BYTES = 2_000_000
+PENDING_CLAIM_PATH = "/v1/onboarding/claim"
+PENDING_STATUS_PATH = "/v1/onboarding/status"
 
 
 @dataclass(slots=True)
@@ -130,7 +132,10 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         self._handle_read(head_only=True)
 
     def do_POST(self) -> None:
-        self._handle_rejected_method()
+        if self.path == PENDING_CLAIM_PATH:
+            self._handle_active_claim()
+        else:
+            self._handle_rejected_method()
 
     def do_PUT(self) -> None:
         self._handle_rejected_method()
@@ -178,6 +183,89 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
             head_only=False,
         )
         self._log_request(HTTPStatus.METHOD_NOT_ALLOWED, started=time.monotonic())
+
+    def _handle_active_claim(self) -> None:
+        """Idempotently tell a previously claimed device that it is active."""
+
+        started = time.monotonic()
+        self._request_id = secrets.token_hex(12)
+        status = HTTPStatus.INTERNAL_SERVER_ERROR
+        acquired = False
+        try:
+            if not self.app._semaphore.acquire(blocking=False):
+                status = HTTPStatus.SERVICE_UNAVAILABLE
+                self._send_json(
+                    status,
+                    {"ok": False, "status": "checking_read_only_key"},
+                    extra_headers={"Retry-After": "1"},
+                    head_only=False,
+                )
+                return
+            acquired = True
+            parsed = urlsplit(self.path)
+            host_values = self.headers.get_all("Host", [])
+            lengths = self.headers.get_all("Content-Length", [])
+            header_size = sum(len(key) + len(value) for key, value in self.headers.items())
+            if (
+                parsed.scheme
+                or parsed.netloc
+                or parsed.query
+                or parsed.fragment
+                or parsed.path != PENDING_CLAIM_PATH
+                or len(host_values) != 1
+                or len(lengths) > 1
+                or (lengths and lengths[0] != "0")
+                or self.headers.get("Transfer-Encoding")
+                or self.headers.get("Expect")
+                or header_size > MAX_HEADER_BYTES
+            ):
+                status = HTTPStatus.BAD_REQUEST
+                self.close_connection = True
+                self._send_json(
+                    status, {"ok": False, "status": "rejected"}, head_only=False
+                )
+                return
+            remote_address = str(self.client_address[0])
+            ip_allowed, retry_after = self.app.ip_limiter.allow(remote_address)
+            if not ip_allowed:
+                status = HTTPStatus.TOO_MANY_REQUESTS
+                self._send_json(
+                    status,
+                    {"ok": False, "status": "checking_read_only_key"},
+                    extra_headers={"Retry-After": str(retry_after)},
+                    head_only=False,
+                )
+                return
+            device_id, token = self._device_credentials()
+            if not self.app.device_registry.authenticate(device_id, token):
+                status = HTTPStatus.UNAUTHORIZED
+                self._send_json(
+                    status,
+                    {"ok": False, "status": "rejected"},
+                    extra_headers={"WWW-Authenticate": 'Bearer realm="pending-setup"'},
+                    head_only=False,
+                )
+                return
+            device_allowed, retry_after = self.app.device_limiter.allow(device_id or "")
+            if not device_allowed:
+                status = HTTPStatus.TOO_MANY_REQUESTS
+                self._send_json(
+                    status,
+                    {"ok": True, "status": "ready", "retry_after_seconds": retry_after},
+                    extra_headers={"Retry-After": str(retry_after)},
+                    head_only=False,
+                )
+                return
+            status = HTTPStatus.OK
+            self._send_json(
+                status,
+                {"ok": True, "status": "ready", "retry_after_seconds": 0},
+                head_only=False,
+            )
+        finally:
+            if acquired:
+                self.app._semaphore.release()
+            self._log_request(status, started=started)
 
     def _handle_read(self, *, head_only: bool) -> None:
         started = time.monotonic()
@@ -278,7 +366,7 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                     head_only=head_only,
                 )
                 return
-            if parsed.path != "/v1/device-feed":
+            if parsed.path not in {"/v1/device-feed", PENDING_STATUS_PATH}:
                 status = HTTPStatus.NOT_FOUND
                 self._send_json(status, {"error": "not_found"}, head_only=head_only)
                 return
@@ -306,6 +394,14 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
             if not self.app.ready:
                 status = HTTPStatus.SERVICE_UNAVAILABLE
                 self._send_json(status, {"error": "not_ready"}, head_only=head_only)
+                return
+            if parsed.path == PENDING_STATUS_PATH:
+                status = HTTPStatus.OK
+                self._send_json(
+                    status,
+                    {"ok": True, "status": "ready", "retry_after_seconds": 0},
+                    head_only=head_only,
+                )
                 return
             feed = to_device_feed(self.app.feed_service.get_feed())
             status = HTTPStatus.OK
@@ -401,7 +497,13 @@ def _safe_route(target: str) -> str:
         parsed = urlsplit(target)
     except ValueError:
         return "invalid"
-    if parsed.path in {"/healthz", "/readyz", "/v1/device-feed"}:
+    if parsed.path in {
+        "/healthz",
+        "/readyz",
+        "/v1/device-feed",
+        PENDING_CLAIM_PATH,
+        PENDING_STATUS_PATH,
+    }:
         return parsed.path
     return "other"
 

@@ -156,7 +156,6 @@ class FirmwareManifest:
 class SetupMetadata:
     session_id: str
     setup_token: str
-    completion_token: str
     csrf_token: str
     endpoint_url: str
     local_page_url: str
@@ -871,17 +870,16 @@ def _validate_ota_data(payload: bytes) -> None:
 
 def build_setup_partition(metadata: SetupMetadata) -> bytes:
     payload_value = {
-        "schema_version": 1,
+        "schema_version": 2,
         "session_id": metadata.session_id,
         "setup_token": metadata.setup_token,
-        "completion_token": metadata.completion_token,
         "csrf_token": metadata.csrf_token,
         "endpoint_url": metadata.endpoint_url,
         "local_page_url": metadata.local_page_url,
         "bridge_url": metadata.bridge_url,
         "expires_at": metadata.expires_at,
     }
-    for name in ("session_id", "setup_token", "completion_token", "csrf_token"):
+    for name in ("session_id", "setup_token", "csrf_token"):
         value = payload_value[name]
         if (
             not isinstance(value, str)
@@ -970,20 +968,18 @@ def parse_setup_partition(image: bytes) -> dict[str, Any]:
         "schema_version",
         "session_id",
         "setup_token",
-        "completion_token",
         "csrf_token",
         "endpoint_url",
         "local_page_url",
         "bridge_url",
         "expires_at",
     }
-    if not isinstance(value, dict) or set(value) != expected_fields or value["schema_version"] != 1:
+    if not isinstance(value, dict) or set(value) != expected_fields or value["schema_version"] != 2:
         raise FirmwareInstallError("setup partition payload is invalid")
     try:
         metadata = SetupMetadata(
             session_id=value["session_id"],
             setup_token=value["setup_token"],
-            completion_token=value["completion_token"],
             csrf_token=value["csrf_token"],
             endpoint_url=value["endpoint_url"],
             local_page_url=value["local_page_url"],

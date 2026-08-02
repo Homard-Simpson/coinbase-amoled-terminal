@@ -251,16 +251,13 @@ std::string RenderUsbOnboardingHtml(const OnboardingMetadataSnapshot& setup) {
     const std::string portal_csrf = NetworkPortal::GetInstance().GetCsrfToken();
     std::string html = R"HTML(<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AMOLED Terminal Setup</title><style>body{font:16px system-ui;background:#07101f;color:#f5f7fa;max-width:560px;margin:28px auto;padding:0 18px}section{background:#121826;padding:22px;border-radius:14px}label{display:block;margin-top:13px}input,textarea,button{box-sizing:border-box;width:100%;padding:12px;margin:6px 0;border-radius:8px;border:1px solid #526079}textarea{min-height:120px}button{background:#377eff;color:white;font-weight:700}small,.muted{color:#b8c1d1}#status{white-space:pre-wrap}.fallback{display:none}a{color:#8ab4ff}</style></head><body><h1>Connect your display</h1><p class="muted">Add home Wi-Fi and a view-only Coinbase key. The key goes straight to the bridge on this computer. This display never receives it.</p><section><form id="setup" autocomplete="off"><label>Home Wi-Fi name</label><input id="ssid" maxlength="32" autocomplete="off" required><label>Home Wi-Fi password</label><input id="wifiPassword" type="password" maxlength="64" autocomplete="new-password"><label>Coinbase CDP ECDSA API-key JSON</label><textarea id="keyText" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste the downloaded JSON"></textarea><input id="keyFile" type="file" accept="application/json,.json" autocomplete="off"><small>Unsafe keys with trade or transfer permission are rejected.</small><button id="finish" type="submit">Finish</button><p id="status" aria-live="polite"></p><p class="fallback" id="fallback">The captive window could not reach this computer. <a href=")HTML";
     html += HtmlEscape(setup.local_page_url);
-    html += R"HTML(" target="_blank" rel="noreferrer noopener">Continue on this computer</a>. If the key check needs internet, reconnect this computer to its usual network there, then return to this display Wi-Fi.</p></form></section><script>'use strict';const endpoint=)HTML";
+    html += R"HTML(" target="_blank" rel="noreferrer noopener">Continue on this computer</a>. Keep the installer running; setup will continue automatically after the display joins home Wi-Fi.</p></form></section><script>'use strict';const endpoint=)HTML";
     html += JsonString(setup.endpoint_url);
-    html += ",provisionEndpoint=" + JsonString(setup.endpoint_origin + "/v1/onboarding/provisioning");
-    html += ",finishEndpoint=" + JsonString(setup.endpoint_origin + "/v1/onboarding/finish");
     html += ",sessionId=" + JsonString(setup.session_id);
     html += ";let setupToken=" + JsonString(setup.setup_token);
-    html += ",completionToken=" + JsonString(setup.completion_token);
     html += ",setupCsrf=" + JsonString(setup.csrf_token);
     html += ",portalCsrf=" + JsonString(portal_csrf) + ";";
-    html += R"HTML(const setupHeaders=()=>({'Authorization':'Setup '+setupToken,'X-Setup-Session':sessionId,'X-CSRF-Token':setupCsrf}),completionHeaders=()=>({'Authorization':'Setup '+completionToken,'X-Setup-Session':sessionId,'X-CSRF-Token':setupCsrf});async function keyDocument(){const f=document.getElementById('keyFile').files[0];return f?await f.text():document.getElementById('keyText').value}async function completedProvisioning(){const r=await fetch(provisionEndpoint,{method:'POST',mode:'cors',cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer',headers:completionHeaders()});if(!r.ok)throw new Error('not-ready');return r.json()}async function checkKey(key){const headers=setupHeaders();headers['Content-Type']='application/json';const r=await fetch(endpoint,{method:'POST',mode:'cors',cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer',headers,body:key});if(!r.ok)throw new Error('key');setupToken='';return r.json()}async function saveOnlySafeValues(p){const body=new URLSearchParams();body.set('csrf',portalCsrf);body.set('ssid',document.getElementById('ssid').value);body.set('password',document.getElementById('wifiPassword').value);body.set('bridge_url',p.bridge_url);body.set('device_id',p.device_id);body.set('bridge_token',p.feed_token);const r=await fetch('/save',{method:'POST',cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body.toString()});if(!r.ok)throw new Error('save')}async function acknowledge(){const r=await fetch(finishEndpoint,{method:'POST',mode:'cors',cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer',headers:completionHeaders()});if(!r.ok)throw new Error('finish');completionToken=''}document.getElementById('setup').addEventListener('submit',async e=>{e.preventDefault();const out=document.getElementById('status'),button=document.getElementById('finish'),text=document.getElementById('keyText'),file=document.getElementById('keyFile');let key='';button.disabled=true;out.textContent='Checking the read-only key…';try{key=await keyDocument();let p;if(key.trim()){p=await checkKey(key)}else{out.textContent='Getting the completed key check from this computer…';p=await completedProvisioning()}await saveOnlySafeValues(p);await acknowledge();document.getElementById('wifiPassword').value='';out.textContent='Setup complete. The display is restarting.'}catch(_error){out.textContent='Setup could not be completed here. Continue on this computer, then return and press Finish with the key field empty.';document.getElementById('fallback').style.display='block';button.disabled=false}finally{key='';text.value='';file.value=''}});</script></body></html>)HTML";
+    html += R"HTML(const setupHeaders=()=>({'Authorization':'Setup '+setupToken,'X-Setup-Session':sessionId,'X-CSRF-Token':setupCsrf});async function keyDocument(){const f=document.getElementById('keyFile').files[0];return f?await f.text():document.getElementById('keyText').value}async function stageKey(key){const headers=setupHeaders();headers['Content-Type']='application/json';const r=await fetch(endpoint,{method:'POST',mode:'cors',cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer',headers,body:key});if(!r.ok)throw new Error('key');setupToken='';return r.json()}async function saveOnlySafeValues(p){const body=new URLSearchParams();body.set('csrf',portalCsrf);body.set('ssid',document.getElementById('ssid').value);body.set('password',document.getElementById('wifiPassword').value);body.set('bridge_url',p.bridge_url);body.set('device_id',p.device_id);body.set('pending_token',p.pending_token);body.set('pending_expires_at',String(p.expires_at));const r=await fetch('/save',{method:'POST',cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body.toString()});if(!r.ok)throw new Error('save')}document.getElementById('setup').addEventListener('submit',async e=>{e.preventDefault();const out=document.getElementById('status'),button=document.getElementById('finish'),text=document.getElementById('keyText'),file=document.getElementById('keyFile'),wifi=document.getElementById('wifiPassword');let key='';button.disabled=true;out.textContent='Saving setup securely…';try{key=await keyDocument();if(!key.trim())throw new Error('key');const pending=await stageKey(key);await saveOnlySafeValues(pending);out.textContent='Saved. The display will reconnect and check the read-only key automatically.'}catch(_error){out.textContent='Setup could not be saved. Keep the installer running, verify the fields, and try again.';document.getElementById('fallback').style.display='block';button.disabled=false}finally{key='';text.value='';file.value='';wifi.value=''}});</script></body></html>)HTML";
     return html;
 }
 
@@ -294,7 +291,7 @@ std::string RenderPortalHtml() {
     html += device_id;
     html += R"HTML("><small>HTTPS is accepted anywhere. Plain HTTP is limited to private, local, or tailnet hosts.</small><label>Bridge bearer token</label><input name="bridge_token" type="password" maxlength="512" autocomplete="new-password"><small>)HTML";
     html += token_hint;
-    html += R"HTML(. Never enter Coinbase API keys here.</small><button>Save and restart</button></form></section><section><h2>Firmware update</h2><p>OTA is disabled unless physically armed. Hold BOOT for 10 seconds, then enter the six-digit code shown on the display.</p><input id="code" inputmode="numeric" maxlength="6" placeholder="One-time code"><input id="file" type="file" accept=".bin,application/octet-stream"><button type="button" onclick="uploadFirmware()">Install firmware</button><div class="status" id="out"></div><small>Use the image for this exact board revision. The inactive slot is selected only after full ESP-IDF image validation.</small></section><section><h2>Factory reset</h2><p>Erases Wi-Fi, bridge URL, bridge token, generated device ID, and setup password. Firmware remains installed.</p><form method="post" action="/factory-reset"><input type="hidden" name="csrf" value=")HTML";
+    html += R"HTML(. Never enter Coinbase API keys here.</small><button>Save and restart</button></form></section><section><h2>Firmware update</h2><p>OTA is disabled unless physically armed. Hold BOOT for 10 seconds, then enter the six-digit code shown on the display.</p><input id="code" inputmode="numeric" maxlength="6" placeholder="One-time code"><input id="file" type="file" accept=".bin,application/octet-stream"><button type="button" onclick="uploadFirmware()">Install firmware</button><div class="status" id="out"></div><small>Use the image for this exact board revision. The inactive slot is selected only after full ESP-IDF image validation.</small></section><section><h2>Factory reset</h2><p>Erases Wi-Fi, active and pending bridge details, generated device ID, and setup password. Firmware remains installed.</p><p><strong>Before resetting, revoke the device ID shown above in the bridge. A display reset cannot revoke an already active bridge token.</strong></p><form method="post" action="/factory-reset"><input type="hidden" name="csrf" value=")HTML";
     html += csrf;
     html += R"HTML("><input name="confirm" autocomplete="off" placeholder="Type RESET"><button class="danger">Erase configuration</button></form></section><script>async function uploadFirmware(){const o=document.getElementById('out'),f=document.getElementById('file').files[0],c=document.getElementById('code').value;if(!f||!/^[0-9]{6}$/.test(c)){o.textContent='Choose a .bin and enter the six-digit screen code.';return}o.textContent='Uploading; keep the device powered.';try{const r=await fetch('/ota',{method:'POST',headers:{'Content-Type':'application/octet-stream','X-OTA-Code':c},body:f});o.textContent=await r.text()}catch(e){o.textContent='Connection closed. If validation completed, the device is restarting.'}}</script></body></html>)HTML";
     return html;
@@ -365,14 +362,22 @@ esp_err_t SaveHandler(httpd_req_t* req) {
     const std::string password = FormValue(body, "password");
     const std::string bridge_url = FormValue(body, "bridge_url");
     const std::string device_id = FormValue(body, "device_id");
-    const std::string bridge_token = FormValue(body, "bridge_token");
+    const std::string pending_token = FormValue(body, "pending_token");
+    int64_t pending_expires_at = 0;
+    if (setup.IsAvailable() && !terminal::validation::PendingExpiry(
+            FormValue(body, "pending_expires_at"), &pending_expires_at))
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Pending setup expiry is invalid");
     if (!ssid.empty() && !terminal::validation::WifiCredential(ssid, password, &reason))
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, reason.c_str());
     if (ssid.empty() && !portal.HasSavedNetwork())
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Wi-Fi network name is required on first setup");
 
-    esp_err_t err = RuntimeConfig::GetInstance().SaveProvisioning(
-        bridge_url, device_id, bridge_token, &reason);
+    esp_err_t err = setup.IsAvailable()
+        ? RuntimeConfig::GetInstance().SavePendingProvisioning(
+              bridge_url, device_id, pending_token, pending_expires_at, &reason)
+        : RuntimeConfig::GetInstance().SaveProvisioning(
+              bridge_url, device_id, FormValue(body, "bridge_token"), &reason);
     if (err == ESP_ERR_INVALID_ARG)
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, reason.c_str());
     if (err != ESP_OK)
@@ -386,7 +391,7 @@ esp_err_t SaveHandler(httpd_req_t* req) {
     httpd_resp_set_type(req, "text/plain");
     SetSaveCorsHeaders(req, origin, setup);
     SetSecurityHeaders(req);
-    httpd_resp_sendstr(req, "Configuration saved. The display is restarting.");
+    httpd_resp_sendstr(req, "Setup staged. The display is reconnecting to finish automatically.");
     xTaskCreate(RestartTask, "setup_restart", 2048, nullptr, 5, nullptr);
     return ESP_OK;
 }
@@ -837,4 +842,9 @@ void NetworkPortal::ArmOta() {
     ESP_ERROR_CHECK(esp_timer_start_once(ota_timer, kOtaWindowSeconds * 1000000ULL));
     NotifyState();
     ESP_LOGW(kTag, "physical OTA window armed for %d seconds", kOtaWindowSeconds);
+}
+
+void NetworkPortal::CompletePendingSetup() {
+    if (connected_ && !ota_armed_) StopPortal();
+    NotifyState();
 }

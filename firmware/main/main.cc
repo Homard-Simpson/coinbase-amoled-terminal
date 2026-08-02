@@ -81,7 +81,8 @@ static int px_row_y[5],px_row_h[5],px_row_asset[5],px_row_n=0;
 // Feed state is produced by a dedicated network task and consumed by the UI loop.
 // Heavy shared state is guarded by state_mux; status and event latches are atomic.
 enum { ST_STARTING=0, ST_UPDATED, ST_NOWIFI, ST_UNCONFIGURED, ST_HTTPERR,
-       ST_JSONERR, ST_TOO_LARGE, ST_UNSAFE };
+       ST_JSONERR, ST_TOO_LARGE, ST_UNSAFE, ST_PENDING_NETWORK,
+       ST_PENDING_CHECK, ST_PENDING_READY, ST_PENDING_REJECTED };
 static std::atomic_int feed_status{ST_STARTING},feed_http_code{0};
 static std::atomic_bool data_dirty{true};
 static SemaphoreHandle_t state_mux=nullptr;
@@ -275,9 +276,10 @@ static void draw(){
   auto& network=NetworkPortal::GetInstance();
   if(network.IsPortalActive()){
     const RuntimeConfigSnapshot runtime=RuntimeConfig::GetInstance().Snapshot();
+    const bool pending=runtime.HasPendingProvisioning();
     const std::string ssid=network.GetApSsid(),password=network.GetApPassword();
     const std::string id_tail=runtime.device_id.size()>12?runtime.device_id.substr(runtime.device_id.size()-12):runtime.device_id;
-    text(20,16,runtime.IsProvisioned()?"SETUP / OTA":"FIRST-BOOT SETUP",WHITE,3);
+    text(20,16,runtime.IsProvisioned()?"SETUP / OTA":(pending?"FINISHING SETUP":"FIRST-BOOT SETUP"),WHITE,3);
     text(20,58,"WI-FI",MUTED,2); text(20,82,ssid.c_str(),BLUE,2);
     text(20,118,"PASSWORD",MUTED,2); text(20,142,password.c_str(),WHITE,2);
     text(20,178,"OPEN",MUTED,2); text(20,202,"http://192.168.4.1",WHITE,2);
@@ -286,6 +288,14 @@ static void draw(){
       text(20,286,"OTA ARMED - 5 MIN",AMBER,2);
       const std::string code=network.GetOtaCode();
       snprintf(b,sizeof(b),"CODE %s",code.c_str()); text(20,316,b,WHITE,3);
+    } else if(pending) {
+      const int status=feed_status.load();
+      const char* message=status==ST_PENDING_CHECK?"Checking read-only key":
+                          status==ST_PENDING_READY?"Ready":
+                          status==ST_PENDING_REJECTED?"Setup rejected - retry":
+                          "Waiting for network";
+      text(20,286,message,status==ST_PENDING_REJECTED?AMBER:GREEN,2);
+      text(20,316,"AUTOMATIC - KEEP HOST ON",MUTED,2);
     } else {
       text(20,286,"OTA LOCKED",GREEN,2);
       text(20,316,"HOLD BOOT 10S TO ARM",MUTED,2);
@@ -311,6 +321,10 @@ static void draw(){
     else if(status==ST_TOO_LARGE)snprintf(b,sizeof(b),"TOO LARGE");
     else if(status==ST_UNSAFE)snprintf(b,sizeof(b),"UNSAFE");
     else if(status==ST_NOWIFI)snprintf(b,sizeof(b),"NO WIFI");
+    else if(status==ST_PENDING_NETWORK)snprintf(b,sizeof(b),"WAITING NET");
+    else if(status==ST_PENDING_CHECK)snprintf(b,sizeof(b),"CHECKING KEY");
+    else if(status==ST_PENDING_READY)snprintf(b,sizeof(b),"READY");
+    else if(status==ST_PENDING_REJECTED)snprintf(b,sizeof(b),"SETUP RETRY");
     else snprintf(b,sizeof(b),"FEED ERR");
     text_right(352,8,b,AMBER,2);
   }
@@ -482,18 +496,107 @@ static void touch_task(void*){
     vTaskDelay(pdMS_TO_TICKS(10));
   }
 }
-struct HttpResponse { std::vector<char> body; bool overflow=false; };
+struct HttpResponse { std::vector<char> body; bool overflow=false; size_t maximum=MAX_FEED_BYTES; };
+static uint32_t pending_retry_ms=1000;
 static esp_err_t http_evt(esp_http_client_event_t *e){
   auto*r=static_cast<HttpResponse*>(e->user_data);
   if(e->event_id==HTTP_EVENT_ON_DATA&&e->data_len>0){
-    if(r->body.size()+(size_t)e->data_len>MAX_FEED_BYTES){r->overflow=true;return ESP_FAIL;}
+    if(r->body.size()+(size_t)e->data_len>r->maximum){r->overflow=true;return ESP_FAIL;}
     const char*p=static_cast<const char*>(e->data);r->body.insert(r->body.end(),p,p+e->data_len);
   }
   return ESP_OK;
 }
+static std::string onboarding_url(const std::string& bridge_url,const char* path){
+  static constexpr const char* feed_path="/v1/device-feed";
+  if(bridge_url.size()<=strlen(feed_path)||
+     bridge_url.compare(bridge_url.size()-strlen(feed_path),strlen(feed_path),feed_path)!=0)return {};
+  return bridge_url.substr(0,bridge_url.size()-strlen(feed_path))+path;
+}
+static bool fetch_pending(RuntimeConfigSnapshot runtime){
+  if(!wifi_up.load()){
+    feed_status=ST_PENDING_NETWORK;data_dirty=true;
+    pending_retry_ms=std::min<uint32_t>(pending_retry_ms*2,30000);
+    return false;
+  }
+  const std::string claim_url=onboarding_url(runtime.pending_bridge_url,"/v1/onboarding/claim");
+  if(claim_url.empty()){
+    RuntimeConfig::GetInstance().ClearPendingProvisioning();
+    feed_status=ST_PENDING_REJECTED;data_dirty=true;return false;
+  }
+  HttpResponse response;response.maximum=2048;
+  std::string auth="Bearer "+runtime.pending_token;
+  esp_http_client_config_t cfg={};
+  cfg.url=claim_url.c_str();cfg.event_handler=http_evt;cfg.user_data=&response;
+  cfg.timeout_ms=12000;cfg.disable_auto_redirect=true;cfg.method=HTTP_METHOD_POST;
+  if(claim_url.rfind("https://",0)==0)cfg.crt_bundle_attach=esp_crt_bundle_attach;
+  esp_http_client_handle_t h=esp_http_client_init(&cfg);
+  if(!h){
+    std::fill(auth.begin(),auth.end(),'\0');
+    std::fill(runtime.pending_token.begin(),runtime.pending_token.end(),'\0');
+    feed_status=ST_PENDING_NETWORK;data_dirty=true;
+    pending_retry_ms=std::min<uint32_t>(pending_retry_ms*2,30000);return false;
+  }
+  esp_http_client_set_header(h,"Authorization",auth.c_str());
+  esp_http_client_set_header(h,"X-Device-ID",runtime.pending_device_id.c_str());
+  esp_http_client_set_header(h,"Accept","application/json");
+  esp_http_client_set_header(h,"User-Agent","amoled-terminal/1");
+  esp_http_client_set_post_field(h,"",0);
+  const esp_err_t err=esp_http_client_perform(h);
+  const int code=esp_http_client_get_status_code(h);
+  esp_http_client_cleanup(h);
+  std::fill(auth.begin(),auth.end(),'\0');
+  std::fill(runtime.pending_token.begin(),runtime.pending_token.end(),'\0');
+  ESP_LOGI(TAG,"pending setup request status=%d result=%s bytes=%u",code,
+           esp_err_to_name(err),(unsigned)response.body.size());
+  if(response.overflow||err!=ESP_OK){
+    feed_status=ST_PENDING_NETWORK;data_dirty=true;
+    pending_retry_ms=std::min<uint32_t>(pending_retry_ms*2,30000);return false;
+  }
+  if(code==401||code==410){
+    RuntimeConfig::GetInstance().ClearPendingProvisioning();
+    feed_status=ST_PENDING_REJECTED;data_dirty=true;return false;
+  }
+  if(code!=200){
+    feed_status=ST_PENDING_NETWORK;data_dirty=true;
+    pending_retry_ms=std::min<uint32_t>(pending_retry_ms*2,30000);return false;
+  }
+  response.body.push_back('\0');
+  cJSON* root=cJSON_ParseWithLengthOpts(response.body.data(),response.body.size(),nullptr,true);
+  cJSON* status_item=nullptr;int status_count=0;
+  for(cJSON* item=root?root->child:nullptr;item;item=item->next)
+    if(item->string&&strcmp(item->string,"status")==0){status_item=item;status_count++;}
+  if(!cJSON_IsObject(root)||status_count!=1||!cJSON_IsString(status_item)||
+     !status_item->valuestring||strlen(status_item->valuestring)>32){
+    if(root)cJSON_Delete(root);
+    feed_status=ST_PENDING_NETWORK;data_dirty=true;
+    pending_retry_ms=std::min<uint32_t>(pending_retry_ms*2,30000);return false;
+  }
+  const std::string status=status_item->valuestring;
+  cJSON_Delete(root);
+  if(status=="ready"){
+    const esp_err_t promote=RuntimeConfig::GetInstance().PromotePendingProvisioning();
+    if(promote!=ESP_OK){
+      ESP_LOGE(TAG,"pending setup promotion failed: %s",esp_err_to_name(promote));
+      feed_status=ST_PENDING_REJECTED;data_dirty=true;return false;
+    }
+    pending_retry_ms=1000;feed_status=ST_PENDING_READY;
+    NetworkPortal::GetInstance().CompletePendingSetup();
+    force_fetch=true;data_dirty=true;
+    return true;
+  }
+  if(status=="rejected"){
+    RuntimeConfig::GetInstance().ClearPendingProvisioning();
+    feed_status=ST_PENDING_REJECTED;data_dirty=true;return false;
+  }
+  if(status=="checking_read_only_key")feed_status=ST_PENDING_CHECK;
+  else if(status=="waiting_for_network")feed_status=ST_PENDING_NETWORK;
+  else feed_status=ST_PENDING_NETWORK;
+  pending_retry_ms=2000;data_dirty=true;return false;
+}
 static bool fetch(){
-  if(!wifi_up.load()){feed_status=ST_NOWIFI;data_dirty=true;return false;}
   RuntimeConfigSnapshot runtime=RuntimeConfig::GetInstance().Snapshot();
+  if(runtime.HasPendingProvisioning())return fetch_pending(std::move(runtime));
+  if(!wifi_up.load()){feed_status=ST_NOWIFI;data_dirty=true;return false;}
   if(!runtime.IsProvisioned()){feed_status=ST_UNCONFIGURED;data_dirty=true;return false;}
 
   HttpResponse response;
@@ -700,7 +803,9 @@ static void fetch_task(void*){
   uint64_t last=0;
   while(true){
     const uint64_t now=esp_timer_get_time()/1000;
-    const uint32_t interval_ms=feed_refresh_seconds?feed_refresh_seconds*1000u:REFRESH_MS;
+    const bool pending=RuntimeConfig::GetInstance().HasPendingProvisioning();
+    const uint32_t interval_ms=pending?pending_retry_ms:
+        (feed_refresh_seconds?feed_refresh_seconds*1000u:REFRESH_MS);
     const bool requested=force_fetch.exchange(false);
     // A physically opened setup/OTA AP does not pause an already connected feed.
     if(requested||last==0||now-last>=interval_ms){last=now;fetch();}

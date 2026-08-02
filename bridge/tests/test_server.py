@@ -145,6 +145,30 @@ class ServerTests(unittest.TestCase):
             )
             self.assertEqual(status, 401)
 
+    def test_active_device_claim_and_status_are_narrow_idempotent_ready_receipts(self) -> None:
+        with running_server() as (base, device_id, token, _store, _manager):
+            for method, path in (
+                ("POST", "/v1/onboarding/claim"),
+                ("GET", "/v1/onboarding/status"),
+            ):
+                status, body, headers = fetch_json(
+                    base + path,
+                    device_id=device_id,
+                    token=token,
+                    method=method,
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(body["status"], "ready")
+                self.assertEqual(body["retry_after_seconds"], 0)
+                self.assertEqual(headers["Cache-Control"], "no-store")
+            status, body, _ = fetch_json(
+                base + "/v1/onboarding/status",
+                device_id=device_id,
+                token=token + "x",
+            )
+            self.assertEqual(status, 401)
+            self.assertEqual(body, {"error": "unauthorized"})
+
     def test_mutations_queries_and_admin_surface_fail_closed(self) -> None:
         with running_server() as (base, device_id, token, _store, _manager):
             parsed = urlsplit(base)

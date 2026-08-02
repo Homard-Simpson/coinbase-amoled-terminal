@@ -10,7 +10,6 @@
 struct OnboardingMetadataSnapshot {
     std::string session_id;
     std::string setup_token;
-    std::string completion_token;
     std::string csrf_token;
     std::string endpoint_url;
     std::string endpoint_origin;

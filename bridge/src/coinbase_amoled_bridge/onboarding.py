@@ -1,10 +1,12 @@
 # ruff: noqa: E501
-"""One-time localhost onboarding endpoint for the USB-provisioned display.
+"""Two-phase onboarding for the USB-provisioned display.
 
-The endpoint is deliberately separate from the long-running device feed. It binds
-only to loopback, accepts one bounded Coinbase CDP JSON document, and returns only
-safe device provisioning values. Request bodies and authorization values are
-never logged.
+The credential endpoint binds only to loopback.  It performs bounded local parsing
+and durably stages an inactive credential bundle, but deliberately does not contact
+Coinbase or enable a device.  A second, token-authenticated LAN endpoint is used by
+the ESP after it joins home Wi-Fi.  Only that claim can trigger the read-only
+permission check and atomic activation.  Request bodies and authorization values
+are never logged.
 """
 
 from __future__ import annotations
@@ -57,6 +59,7 @@ from .errors import (
     SetupSessionError,
 )
 from .quickstart import MAX_CDP_JSON_BYTES, parse_cdp_key_json
+from .ratelimit import ClientHasher, TokenBucketLimiter
 from .user_service import (
     ServiceStartResult,
     restore_user_service,
@@ -73,6 +76,10 @@ except ImportError:  # pragma: no cover - Windows is unsupported.
 LOOPBACK_HOST = "127.0.0.1"
 PORTAL_ORIGIN = "http://192.168.4.1"
 ONBOARDING_PATH = "/v1/onboarding"
+PENDING_CLAIM_PATH = "/v1/onboarding/claim"
+PENDING_STATUS_PATH = "/v1/onboarding/status"
+# Reserved legacy targets. They intentionally have no handlers: browser ACKs
+# must never activate a transaction now that the ESP owns the claim.
 PROVISIONING_PATH = "/v1/onboarding/provisioning"
 FINISH_PATH = "/v1/onboarding/finish"
 MAX_HEADER_BYTES = 16_384
@@ -80,8 +87,12 @@ MAX_REQUEST_TARGET = 512
 MAX_REQUEST_LINE = 768
 MAX_HEADER_COUNT = 64
 MAX_CONCURRENT_CONNECTIONS = 4
-ONBOARDING_JOURNAL_VERSION = 1
+ONBOARDING_JOURNAL_VERSION = 2
 MAX_JOURNAL_BYTES = 16_384
+DEFAULT_PENDING_TTL_SECONDS = 1_800
+MAX_PENDING_TTL_SECONDS = 3_600
+PENDING_RETRY_MAX_SECONDS = 15.0
+PENDING_REJECTION_GRACE_SECONDS = 15.0
 TRANSACTION_ID_RE = re.compile(r"^txn_[A-Za-z0-9_-]{20,72}$")
 GENERIC_ERROR = {"ok": False, "error": "Setup could not be completed."}
 RETRYABLE_PERMISSION_CODES = frozenset(
@@ -96,13 +107,20 @@ class SafeProvisioning:
     bridge_url: str
     device_id: str
     feed_token: str
+    expires_at: int
 
     def public_json(self) -> dict[str, Any]:
         return {
             "ok": True,
             "bridge_url": self.bridge_url,
             "device_id": self.device_id,
-            "feed_token": self.feed_token,
+            # The same high-entropy value is scoped to claim/status until the
+            # read-only check succeeds; only then does it become a feed token.
+            "pending_token": self.feed_token,
+            "expires_at": self.expires_at,
+            "status": "waiting_for_network",
+            "claim_path": PENDING_CLAIM_PATH,
+            "status_path": PENDING_STATUS_PATH,
         }
 
 
@@ -112,7 +130,6 @@ class SetupSession:
 
     session_id: str
     setup_token: str = field(repr=False)
-    completion_token: str = field(repr=False)
     csrf_token: str = field(repr=False)
     created_at: int
     expires_at: int
@@ -124,7 +141,6 @@ class SetupSession:
     _in_flight: bool = field(default=False, init=False, repr=False)
     _used: bool = field(default=False, init=False, repr=False)
     _finished: bool = field(default=False, init=False, repr=False)
-    _completion_digest: bytes = field(default=b"", init=False, repr=False)
     _provisioning: SafeProvisioning | None = field(default=None, init=False, repr=False)
     _lock: threading.Lock = field(
         default_factory=threading.Lock, init=False, repr=False
@@ -150,7 +166,6 @@ class SetupSession:
         return cls(
             session_id=secrets.token_urlsafe(18),
             setup_token=secrets.token_urlsafe(32),
-            completion_token=secrets.token_urlsafe(32),
             csrf_token=secrets.token_urlsafe(32),
             created_at=now,
             expires_at=now + ttl_seconds,
@@ -181,24 +196,6 @@ class SetupSession:
                 and hmac.compare_digest(csrf_token, self.csrf_token)
             )
 
-    def authorize_completion(
-        self, *, session_id: str, completion_token: str, csrf_token: str
-    ) -> bool:
-        try:
-            candidate = hashlib.sha256(completion_token.encode("ascii")).digest()
-        except UnicodeEncodeError:
-            return False
-        with self._lock:
-            return bool(
-                self._used
-                and not self._finished
-                and not self.expired()
-                and self._completion_digest
-                and hmac.compare_digest(session_id, self.session_id)
-                and hmac.compare_digest(candidate, self._completion_digest)
-                and hmac.compare_digest(csrf_token, self.csrf_token)
-            )
-
     def begin_once(self) -> None:
         with self._lock:
             if self.expired() or self._used or self._in_flight:
@@ -216,46 +213,20 @@ class SetupSession:
                 raise SetupSessionError("setup session is unavailable")
             self._in_flight = False
             self._used = True
-            self._completion_digest = hashlib.sha256(
-                self.completion_token.encode("ascii")
-            ).digest()
             self.setup_token = ""
-            self.completion_token = ""
             self.provisioned_event.set()
 
-    def finish_once(
-        self,
-        *,
-        completion_token: str,
-        finisher: Callable[[SafeProvisioning], None],
-    ) -> None:
-        try:
-            candidate = hashlib.sha256(completion_token.encode("ascii")).digest()
-        except UnicodeEncodeError as exc:
-            raise SetupSessionError("setup session is unavailable") from exc
+    def mark_finished(self) -> None:
+        """Record completion after the ESP, never the browser, claims setup."""
+
         with self._lock:
             if (
-                self.expired()
-                or not self._used
+                not self._used
                 or self._finished
-                or not self._completion_digest
-                or not hmac.compare_digest(candidate, self._completion_digest)
                 or self._provisioning is None
             ):
                 raise SetupSessionError("setup session is unavailable")
-            try:
-                # Holding the session lock serializes finish against every other
-                # authorization transition. The coordinator separately serializes
-                # durable finish against rollback across threads and processes.
-                finisher(self._provisioning)
-            except BaseException:
-                self._completion_digest = b""
-                self._provisioning = None
-                self.failed_event.set()
-                self.terminal_event.set()
-                raise
             self._finished = True
-            self._completion_digest = b""
             self._provisioning = None
             self.finished_event.set()
             self.terminal_event.set()
@@ -272,19 +243,17 @@ class SetupSession:
                 return None
             return self._provisioning
 
-    def page_tokens(self) -> tuple[str, str] | None:
+    def page_token(self) -> str | None:
         with self._lock:
             if self.expired() or self._used or self._finished:
                 return None
-            if not self.setup_token or not self.completion_token:
+            if not self.setup_token:
                 return None
-            return self.setup_token, self.completion_token
+            return self.setup_token
 
     def abort(self) -> None:
         with self._lock:
             self.setup_token = ""
-            self.completion_token = ""
-            self._completion_digest = b""
             self._provisioning = None
             self.failed_event.set()
             self.terminal_event.set()
@@ -302,6 +271,8 @@ ReadinessChecker = Callable[[], bool]
 
 JournalPhase = Literal[
     "staged",
+    "claimed",
+    "checking",
     "applying",
     "credentials_active",
     "device_added",
@@ -316,6 +287,7 @@ class _OnboardingJournal:
     transaction_id: str
     phase: JournalPhase
     created_at: str
+    expires_at: int
     bridge_url: str
     device_id: str
     feed_token_sha256: str
@@ -332,6 +304,7 @@ class _OnboardingJournal:
             "transaction_id": self.transaction_id,
             "phase": self.phase,
             "created_at": self.created_at,
+            "expires_at": self.expires_at,
             "bridge_url": self.bridge_url,
             "device_id": self.device_id,
             "feed_token_sha256": self.feed_token_sha256,
@@ -361,6 +334,7 @@ class _OnboardingJournal:
             "transaction_id",
             "phase",
             "created_at",
+            "expires_at",
             "bridge_url",
             "device_id",
             "feed_token_sha256",
@@ -375,6 +349,7 @@ class _OnboardingJournal:
         transaction_id = value.get("transaction_id")
         phase = value.get("phase")
         created_at = value.get("created_at")
+        expires_at = value.get("expires_at")
         bridge_url = value.get("bridge_url")
         device_id = value.get("device_id")
         digest = value.get("feed_token_sha256")
@@ -384,6 +359,8 @@ class _OnboardingJournal:
         previous = value.get("previous_credential_slot")
         phases = {
             "staged",
+            "claimed",
+            "checking",
             "applying",
             "credentials_active",
             "device_added",
@@ -402,6 +379,9 @@ class _OnboardingJournal:
             or phase not in phases
             or not isinstance(created_at, str)
             or not 1 <= len(created_at) <= 40
+            or not isinstance(expires_at, int)
+            or isinstance(expires_at, bool)
+            or expires_at <= 0
             or not isinstance(bridge_url, str)
             or not isinstance(device_id, str)
             or not DEVICE_ID_RE.fullmatch(device_id)
@@ -470,6 +450,7 @@ class _OnboardingJournal:
             transaction_id=transaction_id,
             phase=phase,
             created_at=created_at,
+            expires_at=expires_at,
             bridge_url=bridge_url,
             device_id=device_id,
             feed_token_sha256=digest,
@@ -515,6 +496,7 @@ class OnboardingCoordinator:
         readiness_checker: ReadinessChecker = _bridge_ready,
         finish_timeout_seconds: float = 180.0,
         retry_interval: float = 1.0,
+        pending_ttl_seconds: int = DEFAULT_PENDING_TTL_SECONDS,
     ) -> None:
         try:
             parsed = urlsplit(bridge_url)
@@ -533,6 +515,8 @@ class OnboardingCoordinator:
             raise ValueError("bridge URL is invalid")
         if finish_timeout_seconds < 0 or retry_interval < 0:
             raise ValueError("finalization timing must be non-negative")
+        if not 60 <= pending_ttl_seconds <= MAX_PENDING_TTL_SECONDS:
+            raise ValueError("pending setup lifetime must be 60-3600 seconds")
         self.store = ConfigStore(data_dir)
         self.bridge_url = bridge_url
         self.permission_checker = permission_checker
@@ -540,6 +524,7 @@ class OnboardingCoordinator:
         self.readiness_checker = readiness_checker
         self.finish_timeout_seconds = finish_timeout_seconds
         self.retry_interval = retry_interval
+        self.pending_ttl_seconds = pending_ttl_seconds
         self._transaction_lock = threading.RLock()
         self._journal_dir = self.store.data_dir / ".onboarding"
         self._journal_path = self._journal_dir / "journal.json"
@@ -676,15 +661,29 @@ class OnboardingCoordinator:
         if journal is not None:
             if journal.phase == "complete":
                 self._cleanup_complete_locked(journal)
-            else:
+            elif journal.expires_at <= int(time.time()):
                 self._rollback_journal_locked(journal)
-        self._cleanup_orphans_locked()
+            elif journal.phase in {"staged", "claimed", "checking"}:
+                # Staging and claim are intentionally restart-safe.  A process
+                # interruption while checking has not activated anything, so it
+                # safely resumes from the claimed state.
+                if journal.phase == "checking":
+                    journal.phase = "claimed"
+                    self._write_journal(journal)
+            else:
+                # Activation phases can include external service-manager side
+                # effects. Roll those back deterministically rather than guess.
+                self._rollback_journal_locked(journal)
+        self._cleanup_orphans_locked(self._read_journal())
 
-    def _cleanup_orphans_locked(self) -> None:
+    def _cleanup_orphans_locked(self, current: _OnboardingJournal | None = None) -> None:
         active = active_local_credential_slot(self.store.data_dir)
         if self._journal_dir.is_dir():
             for path in self._journal_dir.glob("txn_*.device-token"):
-                path.unlink(missing_ok=True)
+                if current is None or path != self._token_stage_path(
+                    current.transaction_id
+                ):
+                    path.unlink(missing_ok=True)
             try:
                 self._journal_dir.rmdir()
             except OSError:
@@ -692,24 +691,26 @@ class OnboardingCoordinator:
         slots = self.store.data_dir / "secrets" / "credential-slots"
         if slots.is_dir():
             for path in slots.glob("onboarding_txn_*.bundle"):
-                if path.name != active:
+                if path.name != active and (
+                    current is None or path.name != current.credential_slot
+                ):
                     remove_local_credential_slot(self.store.data_dir, path.name)
 
     def complete(self, credentials: Credentials) -> SafeProvisioning:
-        """Validate and durably stage secrets without activating local state."""
+        """Locally validate and durably stage secrets without network access.
 
-        permission_verified = False
-        try:
-            self.permission_checker(credentials)
-            permission_verified = True
-        except CoinbaseAPIError as exc:
-            if exc.code not in RETRYABLE_PERMISSION_CODES:
-                raise
+        ``parse_cdp_key_json`` and ``stage_local_credential_slot`` have already
+        parsed the P-256 key.  Calling Coinbase here would break Wi-Fi-only hosts
+        attached to the captive AP, so the permission gate is exclusively in the
+        ESP claim path.
+        """
 
+        expires_at = int(time.time()) + self.pending_ttl_seconds
         provisioning = SafeProvisioning(
             bridge_url=self.bridge_url,
             device_id=generate_device_id(),
             feed_token=generate_device_token(),
+            expires_at=expires_at,
         )
         transaction_id = "txn_" + secrets.token_urlsafe(18)
         credential_slot = f"onboarding_{transaction_id}.bundle"
@@ -717,11 +718,12 @@ class OnboardingCoordinator:
             transaction_id=transaction_id,
             phase="staged",
             created_at=iso_z(),
+            expires_at=expires_at,
             bridge_url=self.bridge_url,
             device_id=provisioning.device_id,
             feed_token_sha256=token_digest(provisioning.feed_token),
             credential_slot=credential_slot,
-            permission_verified=permission_verified,
+            permission_verified=False,
         )
 
         with self._transaction_lock:
@@ -756,14 +758,62 @@ class OnboardingCoordinator:
                 raise exc
         return provisioning
 
-    def finish_pending(self, provisioning: SafeProvisioning) -> None:
-        """Atomically finalize the journal before a finish response may succeed."""
+    def pending_provisioning(self) -> SafeProvisioning | None:
+        """Return safe restart-recovery data for a still-inactive transaction."""
 
         with self._transaction_lock:
             self._require_open()
             journal = self._read_journal()
-            if journal is None or journal.phase != "staged":
-                raise ProvisioningError("no setup transaction is pending")
+            if journal is None or journal.phase not in {"staged", "claimed", "checking"}:
+                return None
+            if journal.expires_at <= int(time.time()):
+                self._rollback_journal_locked(journal)
+                return None
+            return SafeProvisioning(
+                bridge_url=journal.bridge_url,
+                device_id=journal.device_id,
+                feed_token=self._read_staged_token(journal),
+                expires_at=journal.expires_at,
+            )
+
+    def claim_pending(self, *, device_id: str, token: str) -> str:
+        """Authenticate the ESP and durably arm the permission gate."""
+
+        with self._transaction_lock:
+            self._require_open()
+            journal = self._read_journal()
+            if journal is None or journal.phase not in {"staged", "claimed", "checking"}:
+                raise SetupSessionError("pending setup is unavailable")
+            if journal.expires_at <= int(time.time()):
+                self._rollback_journal_locked(journal)
+                raise SetupSessionError("pending setup is unavailable")
+            try:
+                candidate_digest = token_digest(token)
+            except (AttributeError, UnicodeEncodeError):
+                candidate_digest = ""
+            if not hmac.compare_digest(device_id, journal.device_id) or not hmac.compare_digest(
+                candidate_digest, journal.feed_token_sha256
+            ):
+                raise SetupSessionError("pending setup is unavailable")
+            if journal.phase == "staged":
+                journal.phase = "claimed"
+                self._write_journal(journal)
+            return "checking_read_only_key"
+
+    def finish_pending(
+        self,
+        provisioning: SafeProvisioning,
+        *,
+        status_callback: Callable[[str], None] | None = None,
+        before_service_start: Callable[[], None] | None = None,
+    ) -> None:
+        """Validate and activate an ESP-claimed transaction atomically."""
+
+        with self._transaction_lock:
+            self._require_open()
+            journal = self._read_journal()
+            if journal is None or journal.phase not in {"claimed", "checking"}:
+                raise ProvisioningError("no claimed setup transaction is pending")
             if (
                 journal.bridge_url != provisioning.bridge_url
                 or journal.device_id != provisioning.device_id
@@ -774,10 +824,15 @@ class OnboardingCoordinator:
             ):
                 raise ProvisioningError("setup transaction changed unexpectedly")
             staged_token = self._read_staged_token(journal)
-            journal.phase = "applying"
+            journal.phase = "checking"
             self._write_journal(journal)
             try:
-                self._finish_locked(journal, staged_token)
+                self._finish_locked(
+                    journal,
+                    staged_token,
+                    status_callback=status_callback,
+                    before_service_start=before_service_start,
+                )
             except BaseException as original_error:
                 current = self._read_journal()
                 if current is not None and current.phase == "complete":
@@ -804,13 +859,26 @@ class OnboardingCoordinator:
                     ) from rollback_error
                 raise original_error
 
-    def _finish_locked(self, journal: _OnboardingJournal, staged_token: str) -> None:
+    def _finish_locked(
+        self,
+        journal: _OnboardingJournal,
+        staged_token: str,
+        *,
+        status_callback: Callable[[str], None] | None,
+        before_service_start: Callable[[], None] | None,
+    ) -> None:
         if not journal.permission_verified:
             credentials = load_local_credential_slot(
                 self.store.data_dir, journal.credential_slot
             )
-            deadline = time.monotonic() + self.finish_timeout_seconds
+            deadline = min(
+                time.monotonic() + self.finish_timeout_seconds,
+                time.monotonic() + max(0, journal.expires_at - int(time.time())),
+            )
+            retry_delay = self.retry_interval
             while True:
+                if status_callback is not None:
+                    status_callback("checking_read_only_key")
                 try:
                     self.permission_checker(credentials)
                     journal.permission_verified = True
@@ -823,13 +891,22 @@ class OnboardingCoordinator:
                         raise ProvisioningError(
                             "Coinbase permission check could not reach the internet"
                         ) from exc
-                    time.sleep(
-                        min(
-                            self.retry_interval,
-                            max(0.0, deadline - time.monotonic()),
-                        )
+                    if status_callback is not None:
+                        status_callback("waiting_for_network")
+                    delay = min(
+                        retry_delay,
+                        PENDING_RETRY_MAX_SECONDS,
+                        max(0.0, deadline - time.monotonic()),
+                    )
+                    if delay:
+                        time.sleep(delay)
+                    retry_delay = min(
+                        PENDING_RETRY_MAX_SECONDS,
+                        max(self.retry_interval, retry_delay * 2 or 0.25),
                     )
 
+        journal.phase = "applying"
+        self._write_journal(journal)
         previous = active_local_credential_slot(self.store.data_dir)
         journal.credential_switch_started = True
         journal.previous_credential_slot = previous
@@ -857,6 +934,9 @@ class OnboardingCoordinator:
         journal.phase = "device_added"
         self._write_journal(journal)
 
+        if before_service_start is not None:
+            before_service_start()
+
         def record_service_baseline(baseline: ServiceStartResult) -> None:
             journal.service = baseline
             journal.phase = "service_starting"
@@ -876,6 +956,8 @@ class OnboardingCoordinator:
         journal.phase = "complete"
         self._write_journal(journal)
         self._cleanup_complete_locked(journal)
+        if status_callback is not None:
+            status_callback("ready")
 
     def _verify_owned_state(self, journal: _OnboardingJournal) -> None:
         if active_local_credential_slot(self.store.data_dir) != journal.credential_slot:
@@ -1060,6 +1142,7 @@ class OnboardingCoordinator:
 class OnboardingApplication:
     session: SetupSession
     coordinator: Any
+    on_staged: Callable[[SafeProvisioning], None] | None = None
     pna_preflight_event: threading.Event = field(default_factory=threading.Event)
 
     @property
@@ -1306,10 +1389,6 @@ class OnboardingRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         if self.path == ONBOARDING_PATH:
             self._handle_onboarding()
-        elif self.path == PROVISIONING_PATH:
-            self._handle_provisioning()
-        elif self.path == FINISH_PATH:
-            self._handle_finish()
         else:
             self._send_json(HTTPStatus.NOT_FOUND, GENERIC_ERROR)
 
@@ -1351,6 +1430,8 @@ class OnboardingRequestHandler(BaseHTTPRequestHandler):
         try:
             provisioning = self.app.coordinator.complete(credentials)
             self.app.session.set_provisioning(provisioning)
+            if self.app.on_staged is not None:
+                self.app.on_staged(provisioning)
             self.app.session.use_once()
         except (CoinbaseAPIError, CredentialError, SetupSessionError):
             self.app.session.fail_attempt()
@@ -1386,51 +1467,7 @@ class OnboardingRequestHandler(BaseHTTPRequestHandler):
             self.app.session.abort()
             return False
 
-    def _handle_provisioning(self) -> None:
-        origin, token = self._authenticated_origin(completion=True)
-        if origin is None or token is None or origin != self.app.session.portal_origin:
-            self._send_json(HTTPStatus.FORBIDDEN, GENERIC_ERROR, origin=origin)
-            return
-        length = self._content_length(maximum=0)
-        if length != 0 or not self._content_type_is(None):
-            self._send_json(HTTPStatus.BAD_REQUEST, GENERIC_ERROR, origin=origin)
-            return
-        provisioning = self.app.session.safe_provisioning()
-        if provisioning is None:
-            self._send_json(HTTPStatus.GONE, GENERIC_ERROR, origin=origin)
-            return
-        self._send_json(HTTPStatus.OK, provisioning.public_json(), origin=origin)
-
-    def _handle_finish(self) -> None:
-        origin, token = self._authenticated_origin(completion=True)
-        if origin is None or token is None:
-            self._send_json(HTTPStatus.FORBIDDEN, GENERIC_ERROR, origin=origin)
-            return
-        length = self._content_length(maximum=0)
-        if length != 0 or not self._content_type_is(None):
-            self._send_json(HTTPStatus.BAD_REQUEST, GENERIC_ERROR, origin=origin)
-            return
-        try:
-            finish = getattr(self.app.coordinator, "finish_pending", None)
-            if finish is None:
-                raise ProvisioningError("setup transaction cannot be finalized")
-            self.app.session.finish_once(
-                completion_token=token,
-                finisher=finish,
-            )
-        except SetupSessionError:
-            self._send_json(HTTPStatus.GONE, GENERIC_ERROR, origin=origin)
-            return
-        except Exception:
-            self._send_json(
-                HTTPStatus.INTERNAL_SERVER_ERROR, GENERIC_ERROR, origin=origin
-            )
-            return
-        self._send_json(HTTPStatus.OK, {"ok": True}, origin=origin)
-
-    def _authenticated_origin(
-        self, *, completion: bool = False
-    ) -> tuple[str | None, str | None]:
+    def _authenticated_origin(self) -> tuple[str | None, str | None]:
         if not self._valid_host() or not self._simple_request_shape():
             return None, None
         origins = self.headers.get_all("Origin", [])
@@ -1459,18 +1496,11 @@ class OnboardingRequestHandler(BaseHTTPRequestHandler):
             or any(character.isspace() for character in token)
         ):
             return origin, None
-        if completion:
-            valid = self.app.session.authorize_completion(
-                session_id=sessions[0],
-                completion_token=token,
-                csrf_token=csrf_values[0],
-            )
-        else:
-            valid = self.app.session.authorize_setup(
-                session_id=sessions[0],
-                setup_token=token,
-                csrf_token=csrf_values[0],
-            )
+        valid = self.app.session.authorize_setup(
+            session_id=sessions[0],
+            setup_token=token,
+            csrf_token=csrf_values[0],
+        )
         return (origin, token) if valid else (origin, None)
 
     def _preflight_origin(self) -> str | None:
@@ -1499,8 +1529,6 @@ class OnboardingRequestHandler(BaseHTTPRequestHandler):
                 "x-csrf-token",
                 "x-setup-session",
             }
-        elif self.path in {PROVISIONING_PATH, FINISH_PATH}:
-            required = {"authorization", "x-csrf-token", "x-setup-session"}
         else:
             return None
         if requested != required:
@@ -1622,11 +1650,272 @@ class OnboardingRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Vary", "Origin")
 
 
+PENDING_WIRE_STATES = frozenset(
+    {
+        "waiting_for_network",
+        "checking_read_only_key",
+        "ready",
+        "rejected",
+    }
+)
+
+
+@dataclass(slots=True)
+class PendingClaimApplication:
+    """In-memory, token-scoped view over one durable pending transaction."""
+
+    coordinator: OnboardingCoordinator
+    expected_host: str
+    status: str = "waiting_for_network"
+    expires_at: int = 0
+    _device_id: str = field(default="", init=False, repr=False)
+    _token_sha256: str = field(default="", init=False, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    claimed_event: threading.Event = field(default_factory=threading.Event)
+    terminal_event: threading.Event = field(default_factory=threading.Event)
+    ip_limiter: TokenBucketLimiter = field(
+        default_factory=lambda: TokenBucketLimiter(60, 8, max_entries=512)
+    )
+    token_limiter: TokenBucketLimiter = field(
+        default_factory=lambda: TokenBucketLimiter(30, 6, max_entries=32)
+    )
+    client_hasher: ClientHasher = field(default_factory=ClientHasher)
+
+    @property
+    def allowed_origins(self) -> frozenset[str]:
+        # LAN claim/status are firmware APIs, never browser CORS endpoints.
+        return frozenset()
+
+    def set_pending(self, provisioning: SafeProvisioning) -> None:
+        with self._lock:
+            if self._device_id and (
+                self._device_id != provisioning.device_id
+                or self._token_sha256 != token_digest(provisioning.feed_token)
+            ):
+                raise ProvisioningError("pending setup changed unexpectedly")
+            self._device_id = provisioning.device_id
+            self._token_sha256 = token_digest(provisioning.feed_token)
+            self.expires_at = provisioning.expires_at
+            self.status = "waiting_for_network"
+
+    def authenticate(self, device_id: str, token: str) -> bool:
+        try:
+            digest = token_digest(token)
+        except (AttributeError, UnicodeEncodeError):
+            digest = ""
+        with self._lock:
+            return bool(
+                self._device_id
+                and hmac.compare_digest(device_id, self._device_id)
+                and hmac.compare_digest(digest, self._token_sha256)
+            )
+
+    def claim(self, *, device_id: str, token: str) -> str:
+        if not self.authenticate(device_id, token):
+            raise SetupSessionError("pending setup is unavailable")
+        with self._lock:
+            if self.status == "rejected" or self.expires_at <= int(time.time()):
+                self.status = "rejected"
+                self.terminal_event.set()
+                raise SetupSessionError("pending setup is unavailable")
+        status = self.coordinator.claim_pending(device_id=device_id, token=token)
+        with self._lock:
+            self.status = status
+            self.claimed_event.set()
+            return self.status
+
+    def set_status(self, status: str) -> None:
+        if status not in PENDING_WIRE_STATES:
+            raise ValueError("invalid pending setup status")
+        with self._lock:
+            self.status = status
+            if status in {"ready", "rejected"}:
+                self.terminal_event.set()
+
+    def public_status(self) -> dict[str, Any]:
+        with self._lock:
+            status = self.status
+            expires_at = self.expires_at
+        value: dict[str, Any] = {
+            "ok": status != "rejected",
+            "status": status,
+            "expires_at": expires_at,
+            "retry_after_seconds": 2 if status != "ready" else 0,
+        }
+        if status == "rejected":
+            value["action"] = "restart_setup"
+        return value
+
+
+class PendingClaimServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = False
+    request_queue_size = 8
+
+    def __init__(
+        self,
+        address: tuple[str, int],
+        app: PendingClaimApplication,
+    ) -> None:
+        self.app = app
+        self._connection_slots = threading.BoundedSemaphore(MAX_CONCURRENT_CONNECTIONS)
+        super().__init__(address, PendingClaimRequestHandler)
+
+    def get_request(self) -> tuple[socket.socket, Any]:
+        connection, address = super().get_request()
+        connection.settimeout(10.0)
+        return connection, address
+
+    def process_request(self, request: socket.socket, client_address: Any) -> None:
+        if not self._connection_slots.acquire(blocking=False):
+            request.close()
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._connection_slots.release()
+            raise
+
+    def process_request_thread(
+        self, request: socket.socket, client_address: Any
+    ) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._connection_slots.release()
+
+
+class PendingClaimRequestHandler(OnboardingRequestHandler):
+    server_version = "CoinbaseAMOLEDPending"
+
+    @property
+    def app(self) -> PendingClaimApplication:  # type: ignore[override]
+        return self.server.app  # type: ignore[attr-defined,no-any-return]
+
+    def do_GET(self) -> None:
+        self._handle_pending(claim=False)
+
+    def do_POST(self) -> None:
+        self._handle_pending(claim=True)
+
+    def do_OPTIONS(self) -> None:
+        self._method_not_allowed()
+
+    def _method_not_allowed(self) -> None:
+        self._send_json(
+            HTTPStatus.METHOD_NOT_ALLOWED,
+            {"ok": False, "status": "rejected"},
+            extra_headers={"Allow": "GET, POST"},
+        )
+
+    def _valid_host(self) -> bool:
+        hosts = self.headers.get_all("Host", [])
+        return len(hosts) == 1 and hmac.compare_digest(
+            hosts[0], self.app.expected_host
+        )
+
+    def _pending_credentials(self) -> tuple[str | None, str | None]:
+        authorizations = self.headers.get_all("Authorization", [])
+        device_ids = self.headers.get_all("X-Device-ID", [])
+        if len(authorizations) != 1 or len(device_ids) != 1:
+            return None, None
+        authorization = authorizations[0]
+        if not authorization.startswith("Bearer "):
+            return None, None
+        token = authorization[7:]
+        device_id = device_ids[0]
+        if (
+            not token
+            or len(token) > 128
+            or any(character.isspace() for character in token)
+            or len(device_id) > 128
+            or any(character.isspace() for character in device_id)
+        ):
+            return None, None
+        return device_id, token
+
+    def _handle_pending(self, *, claim: bool) -> None:
+        expected_path = PENDING_CLAIM_PATH if claim else PENDING_STATUS_PATH
+        if (
+            self.path != expected_path
+            or not self._valid_host()
+            or not self._simple_request_shape()
+            or self._content_length(maximum=0) != 0
+            or not self._content_type_is(None)
+        ):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "status": "rejected"})
+            return
+        remote = str(self.client_address[0])
+        allowed, retry_after = self.app.ip_limiter.allow(remote)
+        if not allowed:
+            self._send_json(
+                HTTPStatus.TOO_MANY_REQUESTS,
+                {"ok": False, "status": "rejected"},
+                extra_headers={"Retry-After": str(retry_after)},
+            )
+            return
+        device_id, token = self._pending_credentials()
+        if device_id is None or token is None or not self.app.authenticate(device_id, token):
+            self._send_json(
+                HTTPStatus.UNAUTHORIZED,
+                {"ok": False, "status": "rejected"},
+                extra_headers={"WWW-Authenticate": 'Bearer realm="pending-setup"'},
+            )
+            return
+        token_key = self.app.client_hasher.digest(token)
+        allowed, retry_after = self.app.token_limiter.allow(token_key)
+        if not allowed:
+            self._send_json(
+                HTTPStatus.TOO_MANY_REQUESTS,
+                self.app.public_status(),
+                extra_headers={"Retry-After": str(retry_after)},
+            )
+            return
+        if claim:
+            try:
+                self.app.claim(device_id=device_id, token=token)
+            except SetupSessionError:
+                self._send_json(HTTPStatus.GONE, self.app.public_status())
+                return
+        self._send_json(HTTPStatus.OK, self.app.public_status())
+
+
+def create_pending_claim_server(
+    coordinator: OnboardingCoordinator,
+    *,
+    bridge_url: str,
+    bind_host: str = "0.0.0.0",
+) -> PendingClaimServer:
+    """Create the narrow HTTP LAN handoff used before the feed is active."""
+
+    parsed = urlsplit(bridge_url)
+    try:
+        port = parsed.port or 80
+    except ValueError as exc:
+        raise ValueError("pending bridge URL is invalid") from exc
+    if (
+        parsed.scheme != "http"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.path != "/v1/device-feed"
+    ):
+        raise ValueError("automated pending claim requires a local HTTP bridge URL")
+    app = PendingClaimApplication(coordinator=coordinator, expected_host=parsed.netloc)
+    recovered = coordinator.pending_provisioning()
+    if recovered is not None:
+        app.set_pending(recovered)
+    return PendingClaimServer((bind_host, port), app)
+
+
 def create_onboarding_server(
     coordinator: Any,
     *,
     ttl_seconds: int = 900,
     portal_origin: str = PORTAL_ORIGIN,
+    on_staged: Callable[[SafeProvisioning], None] | None = None,
 ) -> LocalOnboardingServer:
     session = SetupSession.create(ttl_seconds=ttl_seconds)
     parsed = urlsplit(portal_origin)
@@ -1645,19 +1934,23 @@ def create_onboarding_server(
     ):
         raise ValueError("portal origin must be an exact HTTP origin")
     session.portal_origin = portal_origin.rstrip("/")
-    app = OnboardingApplication(session=session, coordinator=coordinator)
+    app = OnboardingApplication(
+        session=session,
+        coordinator=coordinator,
+        on_staged=on_staged,
+    )
     return LocalOnboardingServer((LOOPBACK_HOST, 0), app)
 
 
 def render_local_setup_page(session: SetupSession) -> str:
     """Render the same-computer fallback without cookies or external resources."""
 
-    tokens = session.page_tokens()
-    if tokens is None:
+    setup_page_token = session.page_token()
+    if setup_page_token is None:
         raise SetupSessionError("setup session is unavailable")
     endpoint = json.dumps(session.endpoint_url)
     session_id = json.dumps(session.session_id)
-    setup_token = json.dumps(tokens[0])
+    setup_token = json.dumps(setup_page_token)
     csrf = json.dumps(session.csrf_token)
     escaped_expiry = html.escape(
         time.strftime("%H:%M", time.localtime(session.expires_at))
@@ -1669,13 +1962,14 @@ body{{font:16px system-ui;background:#07101f;color:#f5f7fa;max-width:560px;margi
 section{{background:#121826;padding:22px;border-radius:14px}}label{{display:block;margin-top:13px}}
 input,textarea,button{{box-sizing:border-box;width:100%;padding:12px;margin:6px 0;border-radius:8px;border:1px solid #526079}}
 textarea{{min-height:150px}}button{{background:#377eff;color:white;font-weight:700}}small,.muted{{color:#b8c1d1}}#status{{white-space:pre-wrap}}</style></head>
-<body><h1>Check the key on this computer</h1><p class="muted">Use this page only if the small captive window could not reach localhost. If the check cannot get online, reconnect this computer to its usual internet network and press Check again.</p>
-<section><form id="setup" autocomplete="off"><label>Coinbase CDP ECDSA API-key JSON</label><textarea id="keyText" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste the downloaded JSON"></textarea>
+<body><h1>Finish display setup</h1><p class="muted">This same-computer page can finish setup without sending the Coinbase key to the display.</p>
+<section><form id="setup" autocomplete="off"><label>Home Wi-Fi name</label><input id="ssid" maxlength="32" autocomplete="off" required><label>Home Wi-Fi password</label><input id="wifiPassword" type="password" maxlength="64" autocomplete="new-password"><label>Coinbase CDP ECDSA API-key JSON</label><textarea id="keyText" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste the downloaded JSON"></textarea>
 <input id="keyFile" type="file" accept="application/json,.json" autocomplete="off"><small>Your key goes only to the bridge on this computer. The display never receives it. This session expires around {escaped_expiry}.</small>
-<button id="finish" type="submit">Check read-only key</button><p id="status" aria-live="polite"></p></form></section>
+<button id="finish" type="submit">Finish</button><p id="status" aria-live="polite"></p></form></section>
 <script>'use strict';
 const endpoint={endpoint},sessionId={session_id},setupCsrf={csrf};let setupToken={setup_token};
 const authHeaders=()=>({{'Authorization':'Setup '+setupToken,'Content-Type':'application/json','X-Setup-Session':sessionId,'X-CSRF-Token':setupCsrf}});
 async function keyDocument(){{const f=document.getElementById('keyFile').files[0];return f?await f.text():document.getElementById('keyText').value;}}
-document.getElementById('setup').addEventListener('submit',async e=>{{e.preventDefault();const out=document.getElementById('status'),button=document.getElementById('finish'),text=document.getElementById('keyText'),file=document.getElementById('keyFile');let key='';button.disabled=true;out.textContent='Checking the read-only key…';try{{key=await keyDocument();const r=await fetch(endpoint,{{method:'POST',mode:'cors',cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer',headers:authHeaders(),body:key}});if(!r.ok)throw new Error('key');await r.json();setupToken='';out.textContent='Key checked. Rejoin the display setup Wi-Fi, open its portal, enter home Wi-Fi, and press Finish. This local setup stays pending until the display confirms its save.';}}catch(_error){{out.textContent='The check could not finish. Confirm the key is P-256 and view-only. If this computer is on the display Wi-Fi, reconnect to its usual internet network and try again.';button.disabled=false;}}finally{{key='';text.value='';file.value='';}}}});
+async function saveOnlySafeValues(p){{const body=new URLSearchParams();body.set('setup_csrf',setupCsrf);body.set('ssid',document.getElementById('ssid').value);body.set('password',document.getElementById('wifiPassword').value);body.set('bridge_url',p.bridge_url);body.set('device_id',p.device_id);body.set('pending_token',p.pending_token);body.set('pending_expires_at',String(p.expires_at));const r=await fetch('http://192.168.4.1/save',{{method:'POST',mode:'cors',cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:body.toString()}});if(!r.ok)throw new Error('save');}}
+document.getElementById('setup').addEventListener('submit',async e=>{{e.preventDefault();const out=document.getElementById('status'),button=document.getElementById('finish'),text=document.getElementById('keyText'),file=document.getElementById('keyFile'),wifi=document.getElementById('wifiPassword');let key='';button.disabled=true;out.textContent='Saving securely…';try{{key=await keyDocument();const r=await fetch(endpoint,{{method:'POST',mode:'cors',cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer',headers:authHeaders(),body:key}});if(!r.ok)throw new Error('key');const pending=await r.json();setupToken='';await saveOnlySafeValues(pending);out.textContent='Saved. The display will reconnect and check the read-only key automatically.';}}catch(_error){{out.textContent='Setup could not be saved. Keep this installer running, verify the fields, and try again.';button.disabled=false;}}finally{{key='';text.value='';file.value='';wifi.value='';}}}});
 </script></body></html>"""

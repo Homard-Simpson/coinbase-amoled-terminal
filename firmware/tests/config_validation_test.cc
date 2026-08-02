@@ -17,6 +17,7 @@ int main() {
     using terminal::validation::BearerToken;
     using terminal::validation::BridgeUrl;
     using terminal::validation::DeviceId;
+    using terminal::validation::PendingExpiry;
     using terminal::validation::SafeProvisioningForm;
     using terminal::validation::WifiCredential;
 
@@ -51,18 +52,24 @@ int main() {
 
     Check(DeviceId("123e4567-e89b-42d3-a456-426614174000"), "UUIDv4 device ID");
     Check(!DeviceId("123e4567-e89b-12d3-a456-426614174000"), "non-v4 UUID must fail");
+    int64_t expiry = 0;
+    Check(PendingExpiry("1900000000", &expiry) && expiry == 1900000000,
+          "pending expiry");
+    Check(!PendingExpiry("-1"), "negative pending expiry must fail");
 
     const std::string safe_form =
         "csrf=abc&ssid=Home&password=correct-horse&"
         "bridge_url=http%3A%2F%2F100.100.20.10%3A8788%2Fv1%2Fdevice-feed&"
         "device_id=123e4567-e89b-42d3-a456-426614174000&"
-        "bridge_token=cbat_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        "pending_token=cbat_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&"
+        "pending_expires_at=1900000000";
     Check(SafeProvisioningForm(safe_form), "safe provisioning form");
     Check(SafeProvisioningForm(
               "setup_csrf=abc&ssid=Home&password=correct-horse&"
               "bridge_url=http%3A%2F%2F100.100.20.10%3A8788%2Fv1%2Fdevice-feed&"
               "device_id=123e4567-e89b-42d3-a456-426614174000&"
-              "bridge_token=cbat_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+              "pending_token=cbat_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&"
+              "pending_expires_at=1900000000"),
           "localhost fallback provisioning form");
     Check(!SafeProvisioningForm(safe_form + "&privateKey=forbidden"),
           "API key field must never reach ESP save");
@@ -71,7 +78,8 @@ int main() {
     Check(!SafeProvisioningForm(
               "ssid=Home&password=-----BEGIN%20PRIVATE%20KEY-----&"
               "bridge_url=http%3A%2F%2F100.100.20.10%3A8788%2Fv1%2Fdevice-feed&"
-              "device_id=123e4567-e89b-42d3-a456-426614174000&bridge_token=token"),
+              "device_id=123e4567-e89b-42d3-a456-426614174000&"
+              "pending_token=token&pending_expires_at=1900000000"),
           "private key material must never reach ESP save");
 
     std::cout << "config validation tests passed\n";
