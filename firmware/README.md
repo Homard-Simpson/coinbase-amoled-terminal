@@ -11,7 +11,12 @@ The ESP never connects to Coinbase or stores exchange API keys. It performs one 
 | `v1` | SH8601 | FT5x06 / FT3168 | TCA9554 + AXP2101 |
 | `v2` | CO5300 | CST820 (CST816-compatible protocol) | TCA9554 reset + narrow AXP PWRKEY IRQ access; no V1 rail writes |
 
-Choose the revision before flashing. The images are not interchangeable. OTA checks the project name and `-v1`/`-v2` version suffix to prevent accidental cross-flashing.
+Choose the revision before flashing. **V1 and V2 describe the AMOLED display controller, not the ESP32-S3:**
+
+- Choose **V1** for the **SH8601** display model, normally paired with FT5x06 or FT3168 touch.
+- Choose **V2** for the **CO5300** display model, normally paired with CST820 or CST816S touch.
+
+Check the seller listing, packaging, board marking, or Waveshare factory-example folder for `SH8601` or `CO5300`. Both models use an ESP32-S3 and a 368 × 448 panel, so the USB port, ESP chip, flash size, and screen dimensions cannot identify the version. If the controller name is unknown, stop instead of trying both firmware images. OTA checks the project name and `-v1`/`-v2` version suffix to prevent accidental cross-flashing.
 
 ## User experience
 
