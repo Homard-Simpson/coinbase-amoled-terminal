@@ -21,8 +21,8 @@ curl -fsSL https://raw.githubusercontent.com/Homard-Simpson/coinbase-amoled-term
 
 At the hidden prompt, paste the Coinbase CDP **ECDSA** API key JSON you downloaded
 from Coinbase, or drag that JSON file into the terminal, then press **Enter**.
-Use a dedicated key with **view permission only**. The setup refuses keys that can
-trade or transfer.
+Use a dedicated key with **VIEW PERMISSION ONLY**. **The setup refuses keys that can
+trade or transfer**.
 
 ### What the installer does
 
