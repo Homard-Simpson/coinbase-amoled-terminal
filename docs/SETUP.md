@@ -24,11 +24,16 @@ and writes a short-lived setup session to the dedicated onboarding partition.
 It does not erase unrelated NVS.
 
 If the existing device contains an official image whose exact flash hash appears
-in the release manifest, that trusted hash identifies V1 or V2. No other USB,
-chip, flash-size, serial-name, or hardware-probe signal is accepted. When a blank
-or DIY board cannot be identified, the installer asks once for V1 or V2 and links
-to the vendor's visual guide. It selects neither by default and fails closed in
-non-interactive mode.
+in the release manifest, that trusted hash identifies the model. Otherwise the
+installer asks which **display controller** the unit has:
+
+- **V1 / SH8601 display**, normally with FT5x06 or FT3168 touch; or
+- **V2 / CO5300 display**, normally with CST820 or CST816S touch.
+
+Check the listing, packaging, board marking, or Waveshare example folder for
+`SH8601` or `CO5300`. Both versions use an ESP32-S3 and a 368 × 448 AMOLED, so USB
+names, chip identity, flash size, and screen dimensions cannot identify the model.
+The installer selects neither by default and fails closed instead of trying both.
 
 ### Step 2
 

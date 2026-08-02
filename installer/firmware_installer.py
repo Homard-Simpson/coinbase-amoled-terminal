@@ -766,7 +766,8 @@ def select_board(
     prompt = (
         "The physical board revision cannot be identified safely from installed firmware.\n"
         f"Check the board or package: {BOARD_HELP_URL}\n"
-        "Enter 1 for V1 (SH8601 / FT-family) or 2 for V2 (CO5300 / CST-family): "
+        "Enter 1 for V1 display (SH8601; usually FT5x06/FT3168 touch) or "
+        "2 for V2 display (CO5300; usually CST820/CST816S touch): "
     )
     answer = input_fn(prompt).strip().lower()
     if answer in {"1", "v1"}:
