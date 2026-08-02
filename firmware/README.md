@@ -19,11 +19,12 @@ Choose the revision before flashing. The images are not interchangeable. OTA che
 - Positions-only summary: open-position value, unrealized P/L, and today's realized P/L. The firmware does not request or display cash or unrelated account balances.
 - Open positions are taller, color-accented, and show an emphasized live price.
 - Tap an asset for an expanded OHLCV chart. Candle body width scales with volume; no separate volume histogram is used.
-- Entry and live-price guide lines, list sparklines, closed-today rows, and a battery/charge indicator.
+- Entry and live-price guide lines, subtle light-blue left-side chart levels, list sparklines, and closed-today rows.
+- A single top row with battery/charge state at left and bridge-local current time at right in 12-hour AM/PM format.
 - Dedicated 10 ms touch task so network requests and frame transfers do not drop taps.
 - **Short BOOT press:** toggle Prices / Positions (or leave a chart).
-- **BOOT hold 0.75-10 seconds:** display off/on.
-- **BOOT hold 10 seconds:** wake the display and arm local OTA for five minutes.
+- **BOOT hold 0.8-10 seconds:** display off/on (privacy/standby).
+- **BOOT hold continuously for 10 seconds:** wake the display and arm local OTA for five minutes.
 
 ## Security model
 
@@ -35,7 +36,7 @@ Choose the revision before flashing. The images are not interchangeable. OTA che
 - HTTPS uses the ESP-IDF certificate bundle. Plain HTTP is accepted only for RFC1918, link-local, loopback, CGNAT/tailnet, `.local`, `.lan`, `.home.arpa`, `.internal`, or single-label LAN hosts.
 - Feed bodies are capped at 192 KiB. Candle storage is capped at 36 per symbol; closed-today storage is capped at 20 rows.
 - The entire response is rejected unless `read_only` is the JSON boolean `true`. Missing, `false`, string, or numeric values fail closed and do not replace the last trusted state.
-- OTA requires physical presence plus a six-digit one-time code. It uses dual slots and ESP-IDF rollback, but it is not a substitute for Secure Boot. Production products should add signed images, Secure Boot, flash encryption, and token rotation.
+- Manual OTA requires physical presence plus a six-digit one-time code. V2 also checks the official latest-release endpoint in the background and accepts only a strictly newer stable V2 application whose SHA-256 is bound to a production-ready Ed25519-signed manifest. Both paths use dual slots and ESP-IDF rollback. This protects network updates, but it is not a substitute for hardware Secure Boot against a physical attacker.
 
 The NVS token is a revocable **bridge credential**, not a Coinbase credential. Never paste Coinbase API keys, API secrets, private keys, or session cookies into the portal.
 
@@ -141,12 +142,20 @@ Compact candles use `[timestamp, open, high, low, close, volume]`. Object candle
 
 ## OTA
 
+### Automatic V2 updates
+
+After a randomized startup delay, V2 checks the official GitHub latest-release endpoint every six hours. It installs only when the release manifest and detached Ed25519 signature authenticate under the pinned release key, all production/control/V2-hardware readiness flags are true, the release is a strictly newer stable semantic version, and the downloaded V2 application matches the signed size, SHA-256, project, board suffix, and app version. Redirects are permitted only in this signed-download path; an altered payload cannot pass the pinned signature and digest checks. Failed checks or transfers leave the current slot selected, and ESP-IDF rollback remains enabled.
+
+V1 does not compile or run the automatic updater. Prereleases and same/older versions are never installed automatically.
+
+### Manual recovery/update
+
 1. Build the image for the device revision.
-2. Hold BOOT for 10 seconds. The display wakes and shows a six-digit code for five minutes.
+2. Hold BOOT continuously for 10 seconds. The display wakes and shows a six-digit code for five minutes.
 3. Join the displayed setup AP, open `http://192.168.4.1`, choose `coinbase_amoled_terminal.bin`, and enter the code.
 4. The firmware verifies project identity, board suffix, size, and complete ESP-IDF image before selecting the inactive slot and restarting.
 
-A failed or interrupted upload leaves the running slot selected. Bootloader rollback remains enabled.
+A failed or interrupted upload leaves the running slot selected. Manual OTA remains available independently of automatic update checks.
 
 ## Factory reset
 

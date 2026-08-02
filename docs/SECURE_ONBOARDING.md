@@ -189,7 +189,7 @@ NVS region.
   unless `--purge` is explicitly supplied.
 
 The physical BOOT contract is unchanged: a short press toggles the view, a
-0.75–10 second hold toggles the display, and a 10 second hold wakes the display and
+0.8–10 second hold toggles the display, and a continuous 10 second hold wakes the display and
 arms local OTA for five minutes.
 
 ## Verification boundary and current release status

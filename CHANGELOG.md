@@ -35,6 +35,10 @@ public releases begin.
   explicit fail-closed V1/V2 choice for blank or DIY boards.
 - A production release gate: public installation remains disabled until signed
   artifacts, controls, and both hardware checklists are verified.
+- V2-only forward automatic OTA using the pinned Ed25519 release-manifest key,
+  signed SHA-256/board/version checks, dual slots, and rollback.
+- A consolidated battery/time header and subtle left-side price levels on token
+  charts, with bridge-local time rendered in 12-hour AM/PM format.
 
 ### Security
 

@@ -154,6 +154,46 @@ class ContractTests(unittest.TestCase):
             "i2c_master_transmit", main[v2_boundary : main.index("#endif", v2_boundary)]
         )
 
+    def test_forward_ui_has_single_clock_row_and_subtle_chart_price_levels(self):
+        main = (ROOT / "main/main.cc").read_text(encoding="utf-8")
+        bridge = (
+            ROOT.parent
+            / "bridge/src/coinbase_amoled_bridge/device_feed.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('static std::string display_time="--:-- --"', main)
+        self.assertIn("valid_display_time", main)
+        self.assertIn("text_right(352,14,display_time.c_str(),WHITE,2)", main)
+        self.assertIn("#if BOARD_IS_V1\n  const char*page=selected_chart", main)
+        self.assertIn("#else\n  // V2 uses one clean top row", main)
+        self.assertIn("LIGHT_BLUE=rgb(105,181,235)", main)
+        self.assertEqual(main.count("draw_price_levels(gx-8"), 2)
+        self.assertIn("#if !BOARD_IS_V1\n      draw_price_levels", main)
+        self.assertIn("display_time", bridge)
+        self.assertIn('suffix = "AM" if now.hour < 12 else "PM"', bridge)
+
+    def test_v2_automatic_ota_is_signed_forward_only_and_v1_excluded(self):
+        main = (ROOT / "main/main.cc").read_text(encoding="utf-8")
+        cmake = (ROOT / "main/CMakeLists.txt").read_text(encoding="utf-8")
+        ota = (ROOT / "main/auto_ota_v2.cc").read_text(encoding="utf-8")
+        component = (ROOT / "main/idf_component.yml").read_text(encoding="utf-8")
+
+        self.assertIn("if(CONFIG_TERMINAL_BOARD_V2)", cmake)
+        self.assertIn('list(APPEND terminal_sources "auto_ota_v2.cc")', cmake)
+        self.assertIn("#if !BOARD_IS_V1\n  StartV2AutomaticOta();\n#endif", main)
+        self.assertIn('espressif/libsodium: "1.0.22"', component)
+        self.assertIn("crypto_sign_verify_detached", ota)
+        self.assertIn("kReleasePublicKey", ota)
+        self.assertIn("UniqueTrue(evidence, \"production_ready\")", ota)
+        self.assertIn("UniqueTrue(attested, \"v2\")", ota)
+        self.assertIn("IsNewer(candidate.semantic_version, current)", ota)
+        self.assertIn("Never auto-install prereleases", ota)
+        self.assertIn("esp_ota_get_next_update_partition", ota)
+        self.assertIn("esp_ota_end", ota)
+        self.assertIn("esp_ota_set_boot_partition", ota)
+        self.assertIn("ConstantTimeEqual(digest.data()", ota)
+        self.assertIn("portal.IsPortalActive() || portal.IsOtaArmed()", ota)
+
     def test_no_private_literals_or_publishable_artifacts(self):
         old_private_token_name = "coinbase" + "-epaper-token"
         forbidden_text = re.compile(

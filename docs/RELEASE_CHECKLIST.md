@@ -89,7 +89,7 @@ board variants, the bridge, documentation, and publication artifacts pass review
 - [ ] FT5x06-family touch works across the screen.
 - [ ] Wi-Fi, HTTPS feed, stale/offline state, and reconnect pass.
 - [ ] Wired recovery and OTA rollback path are available.
-- [ ] BOOT short press, 0.75–10 second display toggle, and 10 second OTA arming
+- [ ] BOOT short press, 0.8–10 second display/privacy toggle, and continuous 10 second OTA arming
   match the documented production contract.
 - [ ] Captive portal completes with a synthetic P-256 view-only test transport and
   clears the one-time onboarding partition after success.
@@ -101,7 +101,7 @@ board variants, the bridge, documentation, and publication artifacts pass review
 - [ ] CST816S/CST820-family touch works across the screen.
 - [ ] Wi-Fi, HTTPS feed, stale/offline state, and reconnect pass.
 - [ ] Wired recovery and OTA rollback path are available.
-- [ ] BOOT short press, 0.75–10 second display toggle, and 10 second OTA arming
+- [ ] BOOT short press, 0.8–10 second display/privacy toggle, and continuous 10 second OTA arming
   match the documented production contract.
 - [ ] Confirm no V1-only AXP2101 write occurs before, during, or after onboarding.
 - [ ] Captive portal completes with a synthetic P-256 view-only test transport and

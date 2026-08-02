@@ -61,6 +61,9 @@ class DeviceFeedProjectionTests(unittest.TestCase):
         self.assertEqual(device["schema_version"], 1)
         self.assertIs(device["read_only"], True)
         self.assertEqual(device["candle_interval_seconds"], 60)
+        self.assertRegex(
+            device["display_time"], r"^(0[1-9]|1[0-2]):[0-5][0-9] (AM|PM)$"
+        )
 
         self.assertIsInstance(device["prices"]["BTC"], float)
         self.assertGreater(device["prices"]["BTC"], 0)

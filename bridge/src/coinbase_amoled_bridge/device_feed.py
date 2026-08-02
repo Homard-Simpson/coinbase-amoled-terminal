@@ -10,6 +10,7 @@ values and market data, never a full account statement.
 from __future__ import annotations
 
 import math
+from datetime import datetime
 from typing import Any
 
 from .util import finite_float
@@ -72,6 +73,15 @@ def _spot_rank(position: dict[str, Any]) -> int:
     # Prefer derivative positions over spot holdings when a symbol collides:
     # they carry entry price and P/L, which is what the position row displays.
     return 0 if position.get("position_type") == "spot" else 1
+
+
+def _display_time() -> str:
+    """Return bridge-local wall time in a locale-independent 12-hour format."""
+
+    now = datetime.now().astimezone()
+    hour = now.hour % 12 or 12
+    suffix = "AM" if now.hour < 12 else "PM"
+    return f"{hour:02d}:{now.minute:02d} {suffix}"
 
 
 def to_device_feed(rich: dict[str, Any]) -> dict[str, Any]:
@@ -143,6 +153,7 @@ def to_device_feed(rich: dict[str, Any]) -> dict[str, Any]:
         "read_only": True,
         "mode": rich.get("mode", "live"),
         "generated_at": rich.get("generated_at"),
+        "display_time": _display_time(),
         "refresh_seconds": refresh_seconds,
         "price_history_seconds": PRICE_HISTORY_SECONDS,
         "candle_interval_seconds": CANDLE_INTERVAL_SECONDS,

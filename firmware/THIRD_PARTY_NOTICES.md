@@ -17,4 +17,4 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 
 ## ESP-IDF managed components
 
-The panel, touch, I/O-expander, and cJSON dependencies are downloaded by ESP-IDF from the component registry according to `main/idf_component.yml`. They are not vendored here. Each downloaded component includes its own upstream license and notices.
+The panel, touch, I/O-expander, cJSON, and V2-only libsodium dependencies are downloaded by ESP-IDF from the component registry according to `main/idf_component.yml`. They are not vendored here. Each downloaded component includes its own upstream license and notices. Libsodium is distributed under the ISC license.

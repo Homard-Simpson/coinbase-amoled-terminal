@@ -101,7 +101,8 @@ The firmware:
 - polls the fixed read-only feed route;
 - validates HTTP status, size, schema version, types, and numeric bounds;
 - renders last-known-good data with clear stale/offline states; and
-- selects V1 or V2 hardware support at build time.
+- selects V1 or V2 hardware support at build time;
+- on V2 only, periodically authenticates the production-ready latest release with the pinned Ed25519 manifest key and installs only a strictly newer stable V2 application after signed size, SHA-256, project, version, and board checks.
 
 It never receives a Coinbase API key and has no code path for order or transfer
 operations.

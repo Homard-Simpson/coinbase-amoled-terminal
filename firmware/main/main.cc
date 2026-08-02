@@ -50,6 +50,9 @@
 #include "network_portal.h"
 #include "onboarding_metadata.h"
 #include "runtime_config.h"
+#if !BOARD_IS_V1
+#include "auto_ota_v2.h"
+#endif
 
 #define PROGMEM
 #include "glcdfont.h"
@@ -78,6 +81,9 @@ static bool detail=false;
 static int selected_chart=-1;
 static uint32_t feed_refresh_seconds=30,history_sample_seconds=30,candle_interval_seconds=0;
 static uint64_t last_ok_ms=0;
+#if !BOARD_IS_V1
+static std::string display_time="--:-- --";
+#endif
 static int px_row_y[5],px_row_h[5],px_row_asset[5],px_row_n=0;
 // Feed state is produced by a dedicated network task and consumed by the UI loop.
 // Heavy shared state is guarded by state_mux; status and event latches are atomic.
@@ -110,6 +116,9 @@ static i2c_master_dev_handle_t axp_read_dev=nullptr;
 
 static uint16_t rgb(uint8_t r,uint8_t g,uint8_t b){ return __builtin_bswap16(((r&0xF8)<<8)|((g&0xFC)<<3)|(b>>3)); }
 static const uint16_t BLACK=rgb(5,8,15),CARD=rgb(18,24,38),GRID=rgb(45,57,78),MUTED=rgb(190,198,214),WHITE=rgb(245,247,250),GREEN=rgb(48,209,88),RED=rgb(255,69,58),BLUE=rgb(55,126,255),AMBER=rgb(255,180,0);
+#if !BOARD_IS_V1
+static const uint16_t LIGHT_BLUE=rgb(105,181,235);
+#endif
 static void rect(int x,int y,int w,int h,uint16_t c){ x=std::max(0,x); y=std::max(0,y); w=std::min(w,W-x); h=std::min(h,H-y); for(int yy=y;yy<y+h;yy++) std::fill(fb+yy*W+x,fb+yy*W+x+w,c); }
 static int text_width(const char*s,int scale=2){ scale=std::max(2,scale); return (int)strlen(s)*6*scale; }
 static void text(int x,int y,const char*s,uint16_t c,int scale=2){ scale=std::max(2,scale); for(;*s;s++,x+=6*scale){ unsigned ch=(unsigned char)*s; if(ch<32||ch>127) ch='?'; for(int i=0;i<5;i++){ uint8_t col=font[ch*5+i]; for(int j=0;j<8;j++) if(col&(1<<j)) rect(x+i*scale,y+j*scale,scale,scale,c); } } }
@@ -118,11 +127,23 @@ static void text_center(int left,int width,int y,const char*s,uint16_t c,int sca
 static void text_bold(int x,int y,const char*s,uint16_t c,int scale=2){ text(x,y,s,c,scale); text(x+1,y,s,c,scale); }
 static void to_upper(char*s){ for(;*s;s++) if(*s>='a'&&*s<='z') *s=(char)(*s-'a'+'A'); }
 static void fmt_money(char *b,size_t n,double v){ double a=fabs(v); if(a>=10000) snprintf(b,n,"$%.0f",v); else if(a>=100) snprintf(b,n,"$%.2f",v); else if(a>=1) snprintf(b,n,"$%.3f",v); else snprintf(b,n,"$%.5f",v); }
+#if !BOARD_IS_V1
+static void fmt_price_level(char*b,size_t n,double v){ double a=fabs(v); if(a>=1000000)snprintf(b,n,"$%.1fM",v/1000000);else if(a>=1000)snprintf(b,n,"$%.1fK",v/1000);else if(a>=100)snprintf(b,n,"$%.0f",v);else if(a>=1)snprintf(b,n,"$%.2f",v);else if(a>=0.01)snprintf(b,n,"$%.3f",v);else snprintf(b,n,"$%.5f",v); }
+#endif
 static void pixel(int x,int y,uint16_t c){ if(x>=0&&x<W&&y>=0&&y<H)fb[y*W+x]=c; }
 static void draw_line(int x0,int y0,int x1,int y1,uint16_t c,int thickness=1){
   int dx=abs(x1-x0),sx=x0<x1?1:-1,dy=-abs(y1-y0),sy=y0<y1?1:-1,err=dx+dy;
   while(true){ for(int yy=0;yy<thickness;yy++)pixel(x0,y0+yy,c); if(x0==x1&&y0==y1)break; int e2=2*err; if(e2>=dy){err+=dy;x0+=sx;} if(e2<=dx){err+=dx;y0+=sy;} }
 }
+#if !BOARD_IS_V1
+static void draw_price_levels(int right,int y,int h,double lo,double hi){
+  char label[20];
+  for(int i=0;i<=4;i++){double value=hi-(hi-lo)*i/4.0;fmt_price_level(label,sizeof(label),value);text_right(right,y+h*i/4-7,label,LIGHT_BLUE,2);}
+}
+static bool valid_display_time(const char*value){
+  return value&&strlen(value)==8&&value[0]>='0'&&value[0]<='1'&&value[1]>='0'&&value[1]<='9'&&value[2]==':'&&value[3]>='0'&&value[3]<='5'&&value[4]>='0'&&value[4]<='9'&&value[5]==' '&&((value[6]=='A'||value[6]=='P')&&value[7]=='M')&&!(value[0]=='0'&&value[1]=='0')&&!(value[0]=='1'&&value[1]>'2');
+}
+#endif
 static double num(cJSON*o,const char*k){cJSON*x=cJSON_GetObjectItemCaseSensitive(o,k);double v=cJSON_IsNumber(x)?x->valuedouble:0;return std::isfinite(v)&&fabs(v)<=1e15?v:0;}
 static double history_at(const Asset&a,int i){ int start=(a.history_head+HISTORY_SAMPLES-a.history_count)%HISTORY_SAMPLES; return a.history[(start+i)%HISTORY_SAMPLES]; }
 static void push_price(Asset&a,double value){ if(!(value>0)||!std::isfinite(value))return; a.history[a.history_head]=value; a.history_head=(a.history_head+1)%HISTORY_SAMPLES; if(a.history_count<HISTORY_SAMPLES)a.history_count++; }
@@ -311,8 +332,13 @@ static void draw(){
   draw_battery(16,12);
   const int status=feed_status.load();
   const bool feed_problem=status!=ST_UPDATED&&status!=ST_STARTING;
+#if BOARD_IS_V1
   const char*page=selected_chart>=0?assets[selected_chart].name:(detail?"POSITIONS":"PRICES");
   text_right(352,28,page,MUTED,2);
+#else
+  // V2 uses one clean top row: power state left, bridge-local 12-hour time right.
+  text_right(352,14,display_time.c_str(),WHITE,2);
+#endif
   if(stale||!wifi_up.load()||feed_problem){
     if(stale)snprintf(b,sizeof(b),"STALE");
     else if(!wifi_up.load())snprintf(b,sizeof(b),"OFFLINE");
@@ -327,7 +353,11 @@ static void draw(){
     else if(status==ST_PENDING_READY)snprintf(b,sizeof(b),"READY");
     else if(status==ST_PENDING_REJECTED)snprintf(b,sizeof(b),"SETUP RETRY");
     else snprintf(b,sizeof(b),"FEED ERR");
+#if BOARD_IS_V1
     text_right(352,8,b,AMBER,2);
+#else
+    text_center(104,152,14,b,AMBER,2);
+#endif
   }
   int top=58;
   if(selected_chart>=0){
@@ -336,7 +366,12 @@ static void draw(){
     text_bold(28,top+8,a.name,WHITE,3);
     fmt_money(b,sizeof(b),a.price); text(28+(int)strlen(a.name)*18+12,top+14,b,AMBER,2);
     double pct=chart_change_pct(a); snprintf(b,sizeof(b),"%+.2f%%",pct); text_right(340,top+14,b,pct>=0?GREEN:RED,2);
-    int gx=32,gy=top+50,gw=304; char t[80];
+#if BOARD_IS_V1
+    int gx=32,gy=top+50,gw=304;
+#else
+    int gx=116,gy=top+50,gw=220;
+#endif
+    char t[80];
     if(a.candle_count){
       // Volume candles: body width represents each candle's volume relative to
       // the highest-volume candle in the visible window. No separate volume bars.
@@ -348,6 +383,9 @@ static void draw(){
       double range=hi-lo;
       if(range<1e-9){double pad=std::max(fabs(hi)*0.0005,1e-6);lo-=pad;hi+=pad;}
       else {double pad=range*0.04;lo-=pad;hi+=pad;}
+#if !BOARD_IS_V1
+      draw_price_levels(gx-8,gy,price_h,lo,hi);
+#endif
       for(int i=0;i<=4;i++){int yy=gy+price_h*i/4;draw_line(gx,yy,gx+gw-1,yy,GRID);}
       auto py=[&](double v){double n=(v-lo)/(hi-lo);n=std::max(0.0,std::min(1.0,n));return gy+price_h-1-(int)lround(n*(price_h-1));};
       int entry_y=-1;
@@ -386,6 +424,9 @@ static void draw(){
       if(a.pos.open&&a.pos.entry>0){if(!hb){lo=hi=a.pos.entry;hb=true;}else{lo=std::min(lo,a.pos.entry);hi=std::max(hi,a.pos.entry);}}
       if(!hb){lo=0;hi=1;}
       if(fabs(hi-lo)<1e-9){double pad=std::max(fabs(hi)*0.0005,1e-6);lo-=pad;hi+=pad;}
+#if !BOARD_IS_V1
+      draw_price_levels(gx-8,gy,gh,lo,hi);
+#endif
       for(int i=0;i<=4;i++){int yy=gy+gh*i/4;draw_line(gx,yy,gx+gw-1,yy,GRID);}
       auto py=[&](double v){double n=(v-lo)/(hi-lo);n=std::max(0.0,std::min(1.0,n));return gy+gh-1-(int)lround(n*(gh-1));};
       if(a.pos.open&&a.pos.entry>0){int ey=py(a.pos.entry);for(int X=gx;X<gx+gw;X+=10)draw_line(X,ey,std::min(X+4,gx+gw-1),ey,AMBER);text(gx+2,ey-16,"ENTRY",AMBER,2);}
@@ -649,6 +690,9 @@ static bool fetch(){
   cJSON*candles=cJSON_GetObjectItemCaseSensitive(d,"candles");
   cJSON*positions=cJSON_GetObjectItemCaseSensitive(d,"positions");
   cJSON*portfolio=cJSON_GetObjectItemCaseSensitive(d,"portfolio");
+#if !BOARD_IS_V1
+  cJSON*clock=cJSON_GetObjectItemCaseSensitive(d,"display_time");
+#endif
   if(!cJSON_IsObject(prices)||!cJSON_IsObject(positions)||!cJSON_IsObject(portfolio)){
     cJSON_Delete(d);feed_status=ST_JSONERR;data_dirty=true;return false;
   }
@@ -657,6 +701,9 @@ static bool fetch(){
   position_value=num(portfolio,"positions_value");
   total_pnl=num(portfolio,"unrealized_pnl");
   realized_pnl_today=num(portfolio,"realized_pnl_today");
+#if !BOARD_IS_V1
+  if(cJSON_IsString(clock)&&valid_display_time(clock->valuestring))display_time=clock->valuestring;
+#endif
   double refresh=num(d,"refresh_seconds");
   if(refresh>=2&&refresh<=3600)feed_refresh_seconds=(uint32_t)refresh;
   double history_step=num(d,"price_history_seconds");
@@ -849,6 +896,9 @@ extern "C" void app_main(){
   network.Initialize(
     [](bool connected){wifi_up=connected;if(connected)force_fetch=true;data_dirty=true;},
     [](){data_dirty=true;});
+#if !BOARD_IS_V1
+  StartV2AutomaticOta();
+#endif
   draw_locked();
   xTaskCreate(fetch_task,"feed",12288,nullptr,4,nullptr);
   xTaskCreate(touch_task,"touch",3072,nullptr,6,nullptr);
