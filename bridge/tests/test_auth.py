@@ -5,6 +5,7 @@ import os
 import stat
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 from cryptography.hazmat.primitives import hashes
@@ -18,9 +19,11 @@ from coinbase_amoled_bridge.auth import (
     JWTSigner,
     active_local_credential_slot,
     compare_and_swap_local_credential_slot,
+    generate_device_id,
     remove_local_credential_slot,
     save_local_credentials,
     stage_local_credential_slot,
+    validate_device_id,
 )
 from coinbase_amoled_bridge.config import ConfigStore
 from coinbase_amoled_bridge.errors import CredentialError, ReadOnlyViolation
@@ -168,6 +171,17 @@ class JWTTests(unittest.TestCase):
 
 
 class DeviceAuthTests(unittest.TestCase):
+    def test_generated_device_id_is_lowercase_uuid4_and_opaque_ids_remain_valid(
+        self,
+    ) -> None:
+        generated = generate_device_id()
+        parsed = uuid.UUID(generated)
+        self.assertEqual(parsed.version, 4)
+        self.assertEqual(str(parsed), generated)
+        self.assertEqual(
+            validate_device_id("dev_existingOpaque_123"), "dev_existingOpaque_123"
+        )
+
     def test_device_token_is_hashed_at_rest_and_revocation_reloads(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             store = ConfigStore(temporary)

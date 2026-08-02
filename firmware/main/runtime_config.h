@@ -41,11 +41,14 @@ public:
                                std::string* validation_error = nullptr);
     // USB onboarding is staged separately. It is not an active feed
     // configuration until the bridge confirms the key is strictly view-only.
-    esp_err_t SavePendingProvisioning(const std::string& bridge_url,
-                                      const std::string& device_id,
-                                      const std::string& pending_token,
-                                      int64_t expires_at,
-                                      std::string* validation_error = nullptr);
+    // Pending setup is durable but invisible to Snapshot()/the fetch task until
+    // CommitPendingProvisioning() writes the commit marker after /save succeeds.
+    esp_err_t StagePendingProvisioning(const std::string& bridge_url,
+                                       const std::string& device_id,
+                                       const std::string& pending_token,
+                                       int64_t expires_at,
+                                       std::string* validation_error = nullptr);
+    esp_err_t CommitPendingProvisioning();
     esp_err_t PromotePendingProvisioning();
     esp_err_t ClearPendingProvisioning();
 
@@ -56,4 +59,5 @@ private:
 
     mutable SemaphoreHandle_t lock_ = nullptr;
     RuntimeConfigSnapshot config_;
+    RuntimeConfigSnapshot staged_pending_;
 };

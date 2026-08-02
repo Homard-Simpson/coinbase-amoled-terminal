@@ -51,9 +51,7 @@ class ContractTests(unittest.TestCase):
     def test_usb_onboarding_partition_and_esp_payload_exclude_coinbase_key(self):
         partitions = (ROOT / "partitions.csv").read_text(encoding="utf-8")
         portal = (ROOT / "main/network_portal.cc").read_text(encoding="utf-8")
-        metadata = (ROOT / "main/onboarding_metadata.cc").read_text(
-            encoding="utf-8"
-        )
+        metadata = (ROOT / "main/onboarding_metadata.cc").read_text(encoding="utf-8")
         self.assertIn("onboarding, data, 0x40,    0xE20000, 0x2000", partitions)
         self.assertIn("kMagic", metadata)
         self.assertIn("{'C', 'B', 'A', 'T', 'S', 'T', '0', '1'}", metadata)
@@ -64,12 +62,21 @@ class ContractTests(unittest.TestCase):
         self.assertIn("SafeProvisioningForm", portal)
         self.assertIn("setupToken=''", portal)
         self.assertNotIn("completionToken", portal)
-        self.assertIn("finally{key='';text.value='';file.value='';wifi.value=''}", portal)
+        self.assertIn(
+            "finally{key='';pending=null;text.value='';file.value='';wifi.value=''}",
+            portal,
+        )
+        self.assertIn("await abortPending(pending)", portal)
+        self.assertIn(
+            "key='';text.value='';file.value='';wifi.value='';await abortPending",
+            portal,
+        )
+        self.assertIn("'/abort-pending'", portal)
         reset_script = (ROOT / "scripts/factory-reset.sh").read_text(encoding="utf-8")
         self.assertIn("erase_region 0x9000 0x6000", reset_script)
         self.assertIn("erase_region 0xE20000 0x2000", reset_script)
 
-        start = portal.index("async function saveOnlySafeValues")
+        start = portal.index("function safePendingBody")
         end = portal.index("document.getElementById('setup')", start)
         esp_request_builder = portal[start:end]
         self.assertIn("bridge_url", esp_request_builder)
@@ -79,22 +86,73 @@ class ContractTests(unittest.TestCase):
         self.assertNotIn("api" + "Key", esp_request_builder)
         self.assertNotIn("PRIVATE " + "KEY-----", esp_request_builder)
 
+    def test_pending_nvs_is_two_phase_fail_closed_and_expires_by_wall_clock(self):
+        runtime = (ROOT / "main/runtime_config.cc").read_text(encoding="utf-8")
+        portal = (ROOT / "main/network_portal.cc").read_text(encoding="utf-8")
+        main = (ROOT / "main/main.cc").read_text(encoding="utf-8")
+
+        self.assertIn('kPendingStateKey[] = "pending_state"', runtime)
+        self.assertIn("kPendingStateStaged", runtime)
+        self.assertIn("kPendingStateCommitted", runtime)
+        self.assertIn("pending_state != kPendingStateCommitted", runtime)
+        self.assertIn("ErasePending(nvs)", runtime)
+        self.assertNotIn("nvs_erase_all", runtime)
+        stage_start = runtime.index("RuntimeConfig::StagePendingProvisioning")
+        commit_start = runtime.index("RuntimeConfig::CommitPendingProvisioning")
+        promote_start = runtime.index("RuntimeConfig::PromotePendingProvisioning")
+        stage = runtime[stage_start:commit_start]
+        commit = runtime[commit_start:promote_start]
+        self.assertNotIn("config_.pending_bridge_url =", stage)
+        self.assertIn("config_.pending_bridge_url = staged_pending_", commit)
+
+        save_start = portal.index("esp_err_t SaveHandler")
+        save_end = portal.index("esp_err_t AbortPendingHandler", save_start)
+        save = portal[save_start:save_end]
+        self.assertLess(save.index("StagePendingProvisioning"), save.index("SaveCredential"))
+        self.assertLess(
+            save.index("OnboardingMetadata::GetInstance().Clear()"),
+            save.index("httpd_resp_sendstr"),
+        )
+        self.assertLess(save.index("httpd_resp_sendstr"), save.index("CommitPendingProvisioning"))
+        self.assertIn("ClearPendingProvisioning", save)
+
+        self.assertIn("WallClockExpired(loaded.pending_expires_at)", runtime)
+        self.assertIn("pending_expired_by_wall_clock", main)
+        self.assertIn("time(nullptr)", main)
+        self.assertIn("MIN_VALID_EPOCH=1577836800", main)
+
+    def test_pending_abort_and_factory_reset_are_bounded_and_key_free(self):
+        portal = (ROOT / "main/network_portal.cc").read_text(encoding="utf-8")
+        self.assertIn('"/v1/onboarding/rejection/abort"', portal)
+        self.assertIn("config.timeout_ms = 5000", portal)
+        self.assertIn("config.disable_auto_redirect = true", portal)
+        self.assertIn("if (portal.IsConnected()) AbortPendingBridgeBestEffort(runtime)", portal)
+        abort_start = portal.index("esp_err_t AbortPendingHandler")
+        abort_end = portal.index("esp_err_t SaveOptionsHandler", abort_start)
+        abort = portal[abort_start:abort_end]
+        self.assertIn("SafePendingAbortForm", abort)
+        self.assertIn("PendingBearerToken", abort)
+        self.assertNotIn("privateKey", abort)
+        self.assertNotIn("setupToken", abort)
+
     def test_physical_button_contract_and_v2_pmu_guard_are_unchanged(self):
         main = (ROOT / "main/main.cc").read_text(encoding="utf-8")
         self.assertIn("now-button_at>=10000", main)
-        self.assertIn("held>=750", main)
+        self.assertIn("held>=800", main)
+        self.assertNotIn("held>=750", main)
         self.assertIn("#if BOARD_IS_V1", main)
         v1_start = main.index("static const uint8_t axp_seq")
         v2_boundary = main.index("#else", v1_start)
         v1_block = main[v1_start:v2_boundary]
         self.assertIn("i2c_master_transmit", v1_block)
         rail_registers = [
-            int(value, 16)
-            for value in re.findall(r"\{0x([89][0-9A-Fa-f]),", v1_block)
+            int(value, 16) for value in re.findall(r"\{0x([89][0-9A-Fa-f]),", v1_block)
         ]
         self.assertEqual(rail_registers, [0x80, 0x90, 0x91, 0x82, 0x92, 0x90])
         self.assertEqual(main.count("i2c_master_transmit(axp,"), 1)
-        self.assertNotIn("i2c_master_transmit", main[v2_boundary:main.index("#endif", v2_boundary)])
+        self.assertNotIn(
+            "i2c_master_transmit", main[v2_boundary : main.index("#endif", v2_boundary)]
+        )
 
     def test_no_private_literals_or_publishable_artifacts(self):
         old_private_token_name = "coinbase" + "-epaper-token"

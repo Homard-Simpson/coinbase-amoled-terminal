@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <string>
 #include <utility>
 #include <vector>
@@ -512,7 +513,18 @@ static std::string onboarding_url(const std::string& bridge_url,const char* path
      bridge_url.compare(bridge_url.size()-strlen(feed_path),strlen(feed_path),feed_path)!=0)return {};
   return bridge_url.substr(0,bridge_url.size()-strlen(feed_path))+path;
 }
+static bool pending_expired_by_wall_clock(int64_t expires_at){
+  constexpr int64_t MIN_VALID_EPOCH=1577836800;  // 2020-01-01 UTC
+  const int64_t now=static_cast<int64_t>(time(nullptr));
+  return now>=MIN_VALID_EPOCH&&expires_at>0&&now>=expires_at;
+}
 static bool fetch_pending(RuntimeConfigSnapshot runtime){
+  if(pending_expired_by_wall_clock(runtime.pending_expires_at)){
+    RuntimeConfig::GetInstance().ClearPendingProvisioning();
+    std::fill(runtime.pending_token.begin(),runtime.pending_token.end(),'\0');
+    feed_status=ST_PENDING_REJECTED;data_dirty=true;pending_retry_ms=1000;
+    return false;
+  }
   if(!wifi_up.load()){
     feed_status=ST_PENDING_NETWORK;data_dirty=true;
     pending_retry_ms=std::min<uint32_t>(pending_retry_ms*2,30000);
@@ -870,7 +882,7 @@ extern "C" void app_main(){
     }
     if(!pressed&&button_down&&!ota_hold_handled){
       const uint64_t held=now-button_at;
-      if(held>=750){set_screen(!screen_on);if(screen_on)need_draw=true;}
+      if(held>=800){set_screen(!screen_on);if(screen_on)need_draw=true;}
       else if(!portal&&screen_on){if(selected_chart>=0)selected_chart=-1;else detail=!detail;need_draw=true;}
     }
     button_down=pressed;

@@ -15,6 +15,7 @@ import struct
 import tempfile
 import threading
 import time
+import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -464,7 +465,9 @@ class JWTSigner:
 
 
 def generate_device_id() -> str:
-    return "dev_" + secrets.token_urlsafe(18)
+    """Generate the lowercase UUIDv4 identity required by device firmware."""
+
+    return str(uuid.uuid4())
 
 
 def validate_device_id(device_id: str) -> str:

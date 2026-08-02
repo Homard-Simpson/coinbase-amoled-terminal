@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
@@ -33,6 +34,7 @@ from coinbase_amoled_bridge.onboarding import (
     MAX_CONCURRENT_CONNECTIONS,
     MAX_HEADER_BYTES,
     ONBOARDING_PATH,
+    PENDING_ABORT_PATH,
     PENDING_CLAIM_PATH,
     PENDING_STATUS_PATH,
     PORTAL_ORIGIN,
@@ -197,7 +199,9 @@ class SetupSessionTests(unittest.TestCase):
         with self.assertRaises(SetupSessionError):
             expired.begin_once()
 
-    def test_local_fallback_clears_inputs_and_saves_only_safe_pending_values(self) -> None:
+    def test_local_fallback_clears_inputs_and_saves_only_safe_pending_values(
+        self,
+    ) -> None:
         session = SetupSession.create(ttl_seconds=60)
         session.bind_endpoint(43123)
         page = render_local_setup_page(session)
@@ -211,7 +215,16 @@ class SetupSessionTests(unittest.TestCase):
         self.assertNotIn("reconnect this computer", page.lower())
         self.assertNotIn("localStorage", page)
         self.assertNotIn("sessionStorage", page)
-        self.assertIn("key='';text.value='';file.value='';wifi.value=''", page)
+        self.assertIn("await abortPending(pending)", page)
+        self.assertIn(
+            "key='';text.value='';file.value='';wifi.value='';await abortPending",
+            page,
+        )
+        self.assertIn("/abort-pending", page)
+        self.assertIn(
+            "key='';pending=null;text.value='';file.value='';wifi.value=''", page
+        )
+        self.assertNotIn("setupHeaders(),body:safePendingBody", page)
 
 
 class OnboardingHTTPTests(unittest.TestCase):
@@ -251,7 +264,46 @@ class OnboardingHTTPTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertNotIn("access-control-allow-origin", headers)
 
-    def test_valid_key_returns_only_safe_pending_values_and_no_browser_ack_route(self) -> None:
+    def test_real_generated_uuid_reaches_end_to_end_staging_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            coordinator = OnboardingCoordinator(
+                temporary,
+                bridge_url="http://100.100.20.10:8788/v1/device-feed",
+                permission_checker=mock.Mock(
+                    side_effect=AssertionError("staging contacted Coinbase")
+                ),
+                service_starter=mock.Mock(
+                    return_value=ServiceStartResult("started", "none")
+                ),
+                readiness_checker=mock.Mock(return_value=True),
+                pending_ttl_seconds=60,
+            )
+            running = RunningServer(coordinator)
+            try:
+                status, _, body = running.request(
+                    "POST",
+                    ONBOARDING_PATH,
+                    body=key_json(marker="real-generated-id"),
+                    headers=running.auth_headers(),
+                )
+                self.assertEqual(status, 200)
+                payload = json.loads(body)
+                generated = payload["device_id"]
+                parsed = uuid.UUID(generated)
+                self.assertEqual(parsed.version, 4)
+                self.assertEqual(str(parsed), generated)
+                self.assertEqual(
+                    coordinator.pending_provisioning().device_id,
+                    generated,
+                )
+            finally:
+                running.close()
+                coordinator.rollback_pending()
+                coordinator.close()
+
+    def test_valid_key_returns_only_safe_pending_values_and_no_browser_ack_route(
+        self,
+    ) -> None:
         key = key_json(marker="must-not-leak")
         headers = self.running.auth_headers()
         status, response_headers, body = self.running.request(
@@ -434,16 +486,25 @@ class CoordinatorTransactionTests(unittest.TestCase):
 
     def test_staging_is_local_only_crash_safe_mode_0600_and_feed_inactive(self) -> None:
         credentials = self._credentials("local-only")
-        permission = mock.Mock(side_effect=AssertionError("network gate ran during staging"))
+        permission = mock.Mock(
+            side_effect=AssertionError("network gate ran during staging")
+        )
         with tempfile.TemporaryDirectory() as temporary:
             with self._coordinator(temporary, permission=permission) as coordinator:
                 pending = coordinator.complete(credentials)
+                parsed_id = uuid.UUID(pending.public_json()["device_id"])
+                self.assertEqual(parsed_id.version, 4)
+                self.assertEqual(str(parsed_id), pending.device_id)
                 self.assertTrue(coordinator.journal_path.is_file())
                 self.assertFalse(Path(temporary, "config.json").exists())
                 self.assertIsNone(active_local_credential_slot(temporary))
-                slot = next(Path(temporary, "secrets", "credential-slots").glob("*.bundle"))
+                slot = next(
+                    Path(temporary, "secrets", "credential-slots").glob("*.bundle")
+                )
                 self.assertEqual(stat.S_IMODE(os.stat(slot).st_mode), 0o600)
-                self.assertEqual(stat.S_IMODE(os.stat(coordinator.journal_path).st_mode), 0o600)
+                self.assertEqual(
+                    stat.S_IMODE(os.stat(coordinator.journal_path).st_mode), 0o600
+                )
                 public = pending.public_json()
                 self.assertNotIn(credentials.key_name, json.dumps(public))
                 self.assertNotIn("feed_token", public)
@@ -451,7 +512,9 @@ class CoordinatorTransactionTests(unittest.TestCase):
                 self.assertFalse(Path(temporary, "secrets").exists())
         permission.assert_not_called()
 
-    def test_offline_then_online_claim_activates_credentials_and_feed_token(self) -> None:
+    def test_offline_then_online_claim_activates_credentials_and_feed_token(
+        self,
+    ) -> None:
         credentials = self._credentials("offline-online")
         permission = mock.Mock(
             side_effect=[CoinbaseAPIError("upstream_unreachable"), None]
@@ -464,7 +527,9 @@ class CoordinatorTransactionTests(unittest.TestCase):
                 self._claim(coordinator, pending)
                 coordinator.finish_pending(pending, status_callback=states.append)
                 registry = DeviceRegistry(ConfigStore(temporary), reload_interval=0)
-                self.assertTrue(registry.authenticate(pending.device_id, pending.feed_token))
+                self.assertTrue(
+                    registry.authenticate(pending.device_id, pending.feed_token)
+                )
                 self.assertEqual(
                     Credentials.load_local(temporary).key_name,
                     credentials.key_name,
@@ -486,7 +551,9 @@ class CoordinatorTransactionTests(unittest.TestCase):
                 self.assertIsNone(active_local_credential_slot(temporary))
                 config_path = Path(temporary, "config.json")
                 if config_path.exists():
-                    self.assertNotIn(pending.device_id, ConfigStore(temporary).load()["devices"])
+                    self.assertNotIn(
+                        pending.device_id, ConfigStore(temporary).load()["devices"]
+                    )
                 self.assertFalse(
                     Path(
                         temporary,
@@ -510,9 +577,9 @@ class CoordinatorTransactionTests(unittest.TestCase):
                 self.assertEqual(restored, pending)
                 claimed_recovery.finish_pending(restored)
                 self.assertTrue(
-                    DeviceRegistry(ConfigStore(temporary), reload_interval=0).authenticate(
-                        pending.device_id, pending.feed_token
-                    )
+                    DeviceRegistry(
+                        ConfigStore(temporary), reload_interval=0
+                    ).authenticate(pending.device_id, pending.feed_token)
                 )
 
     def test_expired_unclaimed_stage_is_removed_on_startup(self) -> None:
@@ -548,7 +615,9 @@ class CoordinatorTransactionTests(unittest.TestCase):
                 self.assertNotIn(pending.device_id, current["devices"])
                 self.assertEqual(current["settings"], original["settings"])
 
-    def test_owner_lock_refuses_second_coordinator_and_corrupt_journal_is_loud(self) -> None:
+    def test_owner_lock_refuses_second_coordinator_and_corrupt_journal_is_loud(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             with self._coordinator(temporary):
                 with self.assertRaises(ProvisioningError):
@@ -557,7 +626,9 @@ class CoordinatorTransactionTests(unittest.TestCase):
             journal = Path(temporary, ".onboarding", "journal.json")
             journal.parent.mkdir(mode=0o700)
             journal.write_text("{}\n", encoding="ascii")
-            with self.assertRaisesRegex(ProvisioningError, "recovery journal is invalid"):
+            with self.assertRaisesRegex(
+                ProvisioningError, "recovery journal is invalid"
+            ):
                 self._coordinator(temporary)
             self.assertEqual(journal.read_text(encoding="ascii"), "{}\n")
 
@@ -578,7 +649,9 @@ class PendingClaimHTTPTests(unittest.TestCase):
             self.temporary.name,
             bridge_url=self.bridge_url,
             permission_checker=self.permission,
-            service_starter=mock.Mock(return_value=ServiceStartResult("started", "none")),
+            service_starter=mock.Mock(
+                return_value=ServiceStartResult("started", "none")
+            ),
             readiness_checker=mock.Mock(return_value=True),
             finish_timeout_seconds=1,
             retry_interval=0,
@@ -689,6 +762,55 @@ class PendingClaimHTTPTests(unittest.TestCase):
             device_id=self.pending.device_id,
         )
         self.assertEqual(status, 405)
+
+    def test_authenticated_abort_is_idempotent_and_wrong_token_cannot_abort(
+        self,
+    ) -> None:
+        status, headers, value = self.request(
+            "POST",
+            PENDING_ABORT_PATH,
+            token=self.pending.feed_token + "x",
+            device_id=self.pending.device_id,
+        )
+        self.assertEqual(status, 401)
+        self.assertEqual(value, {"ok": False, "status": "rejected"})
+        self.assertNotIn("access-control-allow-origin", headers)
+        self.assertTrue(self.coordinator.journal_path.exists())
+        status, _, value = self.request(
+            "POST",
+            PENDING_ABORT_PATH,
+            token=self.pending.feed_token,
+            device_id="wrong-" + self.pending.device_id,
+        )
+        self.assertEqual(status, 401)
+        self.assertEqual(value, {"ok": False, "status": "rejected"})
+        self.assertTrue(self.coordinator.journal_path.exists())
+
+        for _attempt in range(2):
+            status, headers, value = self.request(
+                "POST",
+                PENDING_ABORT_PATH,
+                token=self.pending.feed_token,
+                device_id=self.pending.device_id,
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(value, {"ok": False, "status": "rejected"})
+            self.assertNotIn("access-control-allow-origin", headers)
+        self.assertFalse(self.coordinator.journal_path.exists())
+        self.assertFalse(Path(self.temporary.name, "secrets").exists())
+
+    def test_expired_claim_rolls_back_before_generic_rejection(self) -> None:
+        self.server.app.expires_at = int(time.time()) - 1
+        status, _, value = self.request(
+            "POST",
+            PENDING_CLAIM_PATH,
+            token=self.pending.feed_token,
+            device_id=self.pending.device_id,
+        )
+        self.assertEqual(status, 410)
+        self.assertEqual(value, {"ok": False, "status": "rejected"})
+        self.assertFalse(self.coordinator.journal_path.exists())
+        self.assertFalse(Path(self.temporary.name, "secrets").exists())
 
 
 if __name__ == "__main__":

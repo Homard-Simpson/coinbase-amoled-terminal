@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <initializer_list>
 #include <utility>
 
@@ -22,6 +23,9 @@ constexpr char kPendingUrlKey[] = "pending_url";
 constexpr char kPendingTokenKey[] = "pending_token";
 constexpr char kPendingDeviceIdKey[] = "pending_id";
 constexpr char kPendingExpiryKey[] = "pending_exp";
+constexpr char kPendingStateKey[] = "pending_state";
+constexpr uint8_t kPendingStateStaged = 1;
+constexpr uint8_t kPendingStateCommitted = 2;
 constexpr char kSetupPasswordKey[] = "ap_password";
 constexpr char kConfigVersionKey[] = "cfg_version";
 constexpr uint8_t kConfigVersion = 1;
@@ -29,11 +33,19 @@ constexpr uint8_t kConfigVersion = 1;
 esp_err_t ErasePending(nvs_handle_t nvs) {
     esp_err_t result = ESP_OK;
     for (const char* key : {kPendingUrlKey, kPendingTokenKey, kPendingDeviceIdKey,
-                            kPendingExpiryKey}) {
+                            kPendingExpiryKey, kPendingStateKey}) {
         const esp_err_t err = nvs_erase_key(nvs, key);
         if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND && result == ESP_OK) result = err;
     }
     return result;
+}
+
+bool WallClockExpired(int64_t expires_at) {
+    // ESP-IDF starts with an invalid Unix epoch until wall-clock sync. Never
+    // compare an epoch expiry to uptime/default time and falsely reject setup.
+    constexpr int64_t kMinimumValidEpoch = 1577836800;  // 2020-01-01 UTC
+    const int64_t now = static_cast<int64_t>(time(nullptr));
+    return now >= kMinimumValidEpoch && expires_at > 0 && now >= expires_at;
 }
 
 std::string ReadString(nvs_handle_t nvs, const char* key) {
@@ -93,7 +105,7 @@ bool RuntimeConfigSnapshot::IsProvisioned() const {
 
 bool RuntimeConfigSnapshot::HasPendingProvisioning() const {
     return terminal::validation::BridgeUrl(pending_bridge_url) &&
-           terminal::validation::BearerToken(pending_token) &&
+           terminal::validation::PendingBearerToken(pending_token) &&
            terminal::validation::DeviceId(pending_device_id) &&
            pending_expires_at > 0;
 }
@@ -125,12 +137,21 @@ esp_err_t RuntimeConfig::Initialize() {
     if (nvs_get_i64(nvs, kPendingExpiryKey, &loaded.pending_expires_at) != ESP_OK)
         loaded.pending_expires_at = 0;
 
+    uint8_t pending_state = 0;
+    if (nvs_get_u8(nvs, kPendingStateKey, &pending_state) != ESP_OK)
+        pending_state = 0;
+
     bool dirty = false;
-    const bool any_pending = !loaded.pending_bridge_url.empty() ||
+    const bool any_pending = pending_state != 0 ||
+                             !loaded.pending_bridge_url.empty() ||
                              !loaded.pending_token.empty() ||
                              !loaded.pending_device_id.empty() ||
                              loaded.pending_expires_at != 0;
-    if (any_pending && !loaded.HasPendingProvisioning()) {
+    if (any_pending && (pending_state != kPendingStateCommitted ||
+                        !loaded.HasPendingProvisioning() ||
+                        WallClockExpired(loaded.pending_expires_at))) {
+        // A reboot before the explicit commit marker is fail-closed. Erase only
+        // this transaction's keys; active bridge and unrelated NVS survive.
         err = ErasePending(nvs);
         if (err != ESP_OK) { nvs_close(nvs); return err; }
         loaded.pending_bridge_url.clear();
@@ -162,6 +183,7 @@ esp_err_t RuntimeConfig::Initialize() {
     if (err != ESP_OK) return err;
 
     config_ = std::move(loaded);
+    staged_pending_ = {};
     ESP_LOGI(kTag, "runtime configuration loaded provisioned=%d pending=%d",
              config_.IsProvisioned(), config_.HasPendingProvisioning());
     return ESP_OK;
@@ -229,7 +251,7 @@ esp_err_t RuntimeConfig::SaveProvisioning(const std::string& bridge_url,
     return ESP_OK;
 }
 
-esp_err_t RuntimeConfig::SavePendingProvisioning(
+esp_err_t RuntimeConfig::StagePendingProvisioning(
         const std::string& bridge_url, const std::string& device_id,
         const std::string& pending_token, int64_t expires_at,
         std::string* validation_error) {
@@ -242,20 +264,24 @@ esp_err_t RuntimeConfig::SavePendingProvisioning(
         if (validation_error) *validation_error = "Device ID is invalid";
         return ESP_ERR_INVALID_ARG;
     }
-    if (!terminal::validation::BearerToken(pending_token, &reason)) {
+    if (!terminal::validation::PendingBearerToken(pending_token, &reason)) {
         if (validation_error) *validation_error = reason;
         return ESP_ERR_INVALID_ARG;
     }
-    if (expires_at <= 0) {
+    if (expires_at <= 0 || WallClockExpired(expires_at)) {
         if (validation_error) *validation_error = "Pending setup expiry is invalid";
         return ESP_ERR_INVALID_ARG;
     }
 
     ScopedLock guard(lock_);
+    if (config_.HasPendingProvisioning() || staged_pending_.HasPendingProvisioning())
+        return ESP_ERR_INVALID_STATE;
     nvs_handle_t nvs = 0;
     esp_err_t err = nvs_open(kNamespace, NVS_READWRITE, &nvs);
     if (err != ESP_OK) return err;
-    err = nvs_set_str(nvs, kPendingUrlKey, bridge_url.c_str());
+    err = ErasePending(nvs);
+    if (err == ESP_OK) err = nvs_set_u8(nvs, kPendingStateKey, kPendingStateStaged);
+    if (err == ESP_OK) err = nvs_set_str(nvs, kPendingUrlKey, bridge_url.c_str());
     if (err == ESP_OK) err = nvs_set_str(nvs, kPendingDeviceIdKey, device_id.c_str());
     if (err == ESP_OK) err = nvs_set_str(nvs, kPendingTokenKey, pending_token.c_str());
     if (err == ESP_OK) err = nvs_set_i64(nvs, kPendingExpiryKey, expires_at);
@@ -263,12 +289,32 @@ esp_err_t RuntimeConfig::SavePendingProvisioning(
     nvs_close(nvs);
     if (err != ESP_OK) return err;
 
-    config_.pending_bridge_url = bridge_url;
-    config_.pending_device_id = device_id;
-    config_.pending_token = pending_token;
-    config_.pending_expires_at = expires_at;
+    staged_pending_.pending_bridge_url = bridge_url;
+    staged_pending_.pending_device_id = device_id;
+    staged_pending_.pending_token = pending_token;
+    staged_pending_.pending_expires_at = expires_at;
     if (validation_error) validation_error->clear();
-    ESP_LOGI(kTag, "pending bridge configuration saved");
+    ESP_LOGI(kTag, "pending bridge configuration staged");
+    return ESP_OK;
+}
+
+esp_err_t RuntimeConfig::CommitPendingProvisioning() {
+    ScopedLock guard(lock_);
+    if (!staged_pending_.HasPendingProvisioning()) return ESP_ERR_INVALID_STATE;
+    nvs_handle_t nvs = 0;
+    esp_err_t err = nvs_open(kNamespace, NVS_READWRITE, &nvs);
+    if (err != ESP_OK) return err;
+    err = nvs_set_u8(nvs, kPendingStateKey, kPendingStateCommitted);
+    if (err == ESP_OK) err = nvs_commit(nvs);
+    nvs_close(nvs);
+    if (err != ESP_OK) return err;
+
+    config_.pending_bridge_url = staged_pending_.pending_bridge_url;
+    config_.pending_device_id = staged_pending_.pending_device_id;
+    config_.pending_token = staged_pending_.pending_token;
+    config_.pending_expires_at = staged_pending_.pending_expires_at;
+    staged_pending_ = {};
+    ESP_LOGI(kTag, "pending bridge configuration committed");
     return ESP_OK;
 }
 
@@ -294,6 +340,7 @@ esp_err_t RuntimeConfig::PromotePendingProvisioning() {
     std::fill(config_.pending_token.begin(), config_.pending_token.end(), '\0');
     config_.pending_token.clear();
     config_.pending_expires_at = 0;
+    staged_pending_ = {};
     ESP_LOGI(kTag, "pending bridge configuration activated");
     return ESP_OK;
 }
@@ -302,16 +349,22 @@ esp_err_t RuntimeConfig::ClearPendingProvisioning() {
     ScopedLock guard(lock_);
     nvs_handle_t nvs = 0;
     esp_err_t err = nvs_open(kNamespace, NVS_READWRITE, &nvs);
-    if (err != ESP_OK) return err;
-    err = ErasePending(nvs);
-    if (err == ESP_OK) err = nvs_commit(nvs);
-    nvs_close(nvs);
-    if (err != ESP_OK) return err;
+    if (err == ESP_OK) {
+        err = ErasePending(nvs);
+        if (err == ESP_OK) err = nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+    // Fail closed in RAM even if flash cleanup failed. A later boot will erase
+    // staged/expired keys before exposing them again.
     config_.pending_bridge_url.clear();
     config_.pending_device_id.clear();
     std::fill(config_.pending_token.begin(), config_.pending_token.end(), '\0');
     config_.pending_token.clear();
     config_.pending_expires_at = 0;
-    ESP_LOGI(kTag, "pending bridge configuration cleared");
-    return ESP_OK;
+    std::fill(staged_pending_.pending_token.begin(),
+              staged_pending_.pending_token.end(), '\0');
+    staged_pending_ = {};
+    ESP_LOGI(kTag, "pending bridge configuration cleared result=%s",
+             esp_err_to_name(err));
+    return err;
 }

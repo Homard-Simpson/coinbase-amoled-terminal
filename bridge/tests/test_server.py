@@ -145,7 +145,9 @@ class ServerTests(unittest.TestCase):
             )
             self.assertEqual(status, 401)
 
-    def test_active_device_claim_and_status_are_narrow_idempotent_ready_receipts(self) -> None:
+    def test_active_device_claim_and_status_are_narrow_idempotent_ready_receipts(
+        self,
+    ) -> None:
         with running_server() as (base, device_id, token, _store, _manager):
             for method, path in (
                 ("POST", "/v1/onboarding/claim"),

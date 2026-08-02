@@ -229,6 +229,21 @@ bool BearerToken(std::string_view value, std::string* reason) {
     return true;
 }
 
+bool PendingBearerToken(std::string_view value, std::string* reason) {
+    if (value.size() != 48 || value.substr(0, 5) != "cbat_")
+        return Fail(reason, "Pending bridge token format is invalid");
+    for (char character : value.substr(5)) {
+        const bool base64url = (character >= 'a' && character <= 'z') ||
+                               (character >= 'A' && character <= 'Z') ||
+                               (character >= '0' && character <= '9') ||
+                               character == '_' || character == '-';
+        if (!base64url)
+            return Fail(reason, "Pending bridge token format is invalid");
+    }
+    if (reason) reason->clear();
+    return true;
+}
+
 bool WifiCredential(std::string_view ssid, std::string_view password, std::string* reason) {
     if (ssid.empty() || ssid.size() > 32)
         return Fail(reason, "Wi-Fi network name must be 1-32 bytes");
@@ -309,6 +324,35 @@ bool SafeProvisioningForm(std::string_view body, std::string* reason) {
         !seen.count("bridge_url") || !seen.count("device_id") ||
         (!active && !pending))
         return Fail(reason, "Provisioning request is incomplete");
+    if (reason) reason->clear();
+    return true;
+}
+
+bool SafePendingAbortForm(std::string_view body, std::string* reason) {
+    if (body.empty() || body.size() > 2048)
+        return Fail(reason, "Pending abort request size is invalid");
+    static const std::set<std::string> allowed = {
+        "csrf", "setup_csrf", "bridge_url", "device_id", "pending_token"};
+    std::set<std::string> seen;
+    size_t start = 0;
+    while (start <= body.size()) {
+        const size_t end = body.find('&', start);
+        const std::string_view field = body.substr(
+            start, end == std::string_view::npos ? body.size() - start : end - start);
+        const size_t equals = field.find('=');
+        if (field.empty() || equals == std::string_view::npos)
+            return Fail(reason, "Pending abort request fields are invalid");
+        std::string key;
+        if (!StrictUrlDecode(field.substr(0, equals), &key) || !allowed.count(key) ||
+            !seen.insert(key).second)
+            return Fail(reason, "Pending abort request fields are invalid");
+        if (end == std::string_view::npos) break;
+        start = end + 1;
+    }
+    const bool one_csrf = seen.count("csrf") + seen.count("setup_csrf") == 1;
+    if (!one_csrf || !seen.count("bridge_url") || !seen.count("device_id") ||
+        !seen.count("pending_token"))
+        return Fail(reason, "Pending abort request is incomplete");
     if (reason) reason->clear();
     return true;
 }

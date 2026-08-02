@@ -205,7 +205,9 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
             parsed = urlsplit(self.path)
             host_values = self.headers.get_all("Host", [])
             lengths = self.headers.get_all("Content-Length", [])
-            header_size = sum(len(key) + len(value) for key, value in self.headers.items())
+            header_size = sum(
+                len(key) + len(value) for key, value in self.headers.items()
+            )
             if (
                 parsed.scheme
                 or parsed.netloc

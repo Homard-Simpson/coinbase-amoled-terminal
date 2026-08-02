@@ -18,6 +18,8 @@ int main() {
     using terminal::validation::BridgeUrl;
     using terminal::validation::DeviceId;
     using terminal::validation::PendingExpiry;
+    using terminal::validation::PendingBearerToken;
+    using terminal::validation::SafePendingAbortForm;
     using terminal::validation::SafeProvisioningForm;
     using terminal::validation::WifiCredential;
 
@@ -44,6 +46,16 @@ int main() {
     Check(BearerToken(valid_token), "valid bearer token");
     Check(!BearerToken("short"), "short bearer token must fail");
     Check(!BearerToken(std::string(20, 'a') + "\r\nInjected: yes"), "header injection must fail");
+    const std::string pending_token = "cbat_" + std::string(43, 'A');
+    Check(PendingBearerToken(pending_token), "exact pending bearer token");
+    Check(!PendingBearerToken("cbat_" + std::string(42, 'A')),
+          "short pending bearer token must fail");
+    Check(!PendingBearerToken("cbat_" + std::string(44, 'A')),
+          "long pending bearer token must fail");
+    Check(!PendingBearerToken("cbat_" + std::string(42, 'A') + "="),
+          "padded pending bearer token must fail");
+    Check(!PendingBearerToken("other" + std::string(43, 'A')),
+          "wrong pending bearer prefix must fail");
 
     Check(WifiCredential("LocalNetwork", "correct-horse"), "secured Wi-Fi");
     Check(WifiCredential("OpenNetwork", ""), "open Wi-Fi");
@@ -81,6 +93,15 @@ int main() {
               "device_id=123e4567-e89b-42d3-a456-426614174000&"
               "pending_token=token&pending_expires_at=1900000000"),
           "private key material must never reach ESP save");
+
+    const std::string safe_abort =
+        "setup_csrf=abc&"
+        "bridge_url=http%3A%2F%2F100.100.20.10%3A8788%2Fv1%2Fdevice-feed&"
+        "device_id=123e4567-e89b-42d3-a456-426614174000&"
+        "pending_token=cbat_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    Check(SafePendingAbortForm(safe_abort), "safe pending abort form");
+    Check(!SafePendingAbortForm(safe_abort + "&password=forbidden"),
+          "pending abort rejects unrelated fields");
 
     std::cout << "config validation tests passed\n";
     return 0;

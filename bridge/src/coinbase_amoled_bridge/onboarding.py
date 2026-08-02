@@ -11,7 +11,6 @@ are never logged.
 
 from __future__ import annotations
 
-import hashlib
 import hmac
 import html
 import http.client
@@ -78,6 +77,7 @@ PORTAL_ORIGIN = "http://192.168.4.1"
 ONBOARDING_PATH = "/v1/onboarding"
 PENDING_CLAIM_PATH = "/v1/onboarding/claim"
 PENDING_STATUS_PATH = "/v1/onboarding/status"
+PENDING_ABORT_PATH = "/v1/onboarding/rejection/abort"
 # Reserved legacy targets. They intentionally have no handlers: browser ACKs
 # must never activate a transaction now that the ESP owns the claim.
 PROVISIONING_PATH = "/v1/onboarding/provisioning"
@@ -220,11 +220,7 @@ class SetupSession:
         """Record completion after the ESP, never the browser, claims setup."""
 
         with self._lock:
-            if (
-                not self._used
-                or self._finished
-                or self._provisioning is None
-            ):
+            if not self._used or self._finished or self._provisioning is None:
                 raise SetupSessionError("setup session is unavailable")
             self._finished = True
             self._provisioning = None
@@ -526,6 +522,7 @@ class OnboardingCoordinator:
         self.retry_interval = retry_interval
         self.pending_ttl_seconds = pending_ttl_seconds
         self._transaction_lock = threading.RLock()
+        self._abort_requested = threading.Event()
         self._journal_dir = self.store.data_dir / ".onboarding"
         self._journal_path = self._journal_dir / "journal.json"
         self._owner_descriptor: int | None = None
@@ -676,7 +673,9 @@ class OnboardingCoordinator:
                 self._rollback_journal_locked(journal)
         self._cleanup_orphans_locked(self._read_journal())
 
-    def _cleanup_orphans_locked(self, current: _OnboardingJournal | None = None) -> None:
+    def _cleanup_orphans_locked(
+        self, current: _OnboardingJournal | None = None
+    ) -> None:
         active = active_local_credential_slot(self.store.data_dir)
         if self._journal_dir.is_dir():
             for path in self._journal_dir.glob("txn_*.device-token"):
@@ -728,6 +727,7 @@ class OnboardingCoordinator:
 
         with self._transaction_lock:
             self._require_open()
+            self._abort_requested.clear()
             if self._read_journal() is not None:
                 raise ProvisioningError("a setup transaction is already pending")
             token_path = self._token_stage_path(transaction_id)
@@ -764,7 +764,11 @@ class OnboardingCoordinator:
         with self._transaction_lock:
             self._require_open()
             journal = self._read_journal()
-            if journal is None or journal.phase not in {"staged", "claimed", "checking"}:
+            if journal is None or journal.phase not in {
+                "staged",
+                "claimed",
+                "checking",
+            }:
                 return None
             if journal.expires_at <= int(time.time()):
                 self._rollback_journal_locked(journal)
@@ -782,7 +786,11 @@ class OnboardingCoordinator:
         with self._transaction_lock:
             self._require_open()
             journal = self._read_journal()
-            if journal is None or journal.phase not in {"staged", "claimed", "checking"}:
+            if journal is None or journal.phase not in {
+                "staged",
+                "claimed",
+                "checking",
+            }:
                 raise SetupSessionError("pending setup is unavailable")
             if journal.expires_at <= int(time.time()):
                 self._rollback_journal_locked(journal)
@@ -791,9 +799,9 @@ class OnboardingCoordinator:
                 candidate_digest = token_digest(token)
             except (AttributeError, UnicodeEncodeError):
                 candidate_digest = ""
-            if not hmac.compare_digest(device_id, journal.device_id) or not hmac.compare_digest(
-                candidate_digest, journal.feed_token_sha256
-            ):
+            if not hmac.compare_digest(
+                device_id, journal.device_id
+            ) or not hmac.compare_digest(candidate_digest, journal.feed_token_sha256):
                 raise SetupSessionError("pending setup is unavailable")
             if journal.phase == "staged":
                 journal.phase = "claimed"
@@ -811,6 +819,7 @@ class OnboardingCoordinator:
 
         with self._transaction_lock:
             self._require_open()
+            self._raise_if_abort_requested()
             journal = self._read_journal()
             if journal is None or journal.phase not in {"claimed", "checking"}:
                 raise ProvisioningError("no claimed setup transaction is pending")
@@ -867,6 +876,7 @@ class OnboardingCoordinator:
         status_callback: Callable[[str], None] | None,
         before_service_start: Callable[[], None] | None,
     ) -> None:
+        self._raise_if_abort_requested()
         if not journal.permission_verified:
             credentials = load_local_credential_slot(
                 self.store.data_dir, journal.credential_slot
@@ -877,6 +887,7 @@ class OnboardingCoordinator:
             )
             retry_delay = self.retry_interval
             while True:
+                self._raise_if_abort_requested()
                 if status_callback is not None:
                     status_callback("checking_read_only_key")
                 try:
@@ -905,6 +916,7 @@ class OnboardingCoordinator:
                         max(self.retry_interval, retry_delay * 2 or 0.25),
                     )
 
+        self._raise_if_abort_requested()
         journal.phase = "applying"
         self._write_journal(journal)
         previous = active_local_credential_slot(self.store.data_dir)
@@ -920,6 +932,7 @@ class OnboardingCoordinator:
         journal.phase = "credentials_active"
         self._write_journal(journal)
 
+        self._raise_if_abort_requested()
         self.store.initialize()
         provision = DeviceManager(self.store).add(
             device_id=journal.device_id,
@@ -937,6 +950,8 @@ class OnboardingCoordinator:
         if before_service_start is not None:
             before_service_start()
 
+        self._raise_if_abort_requested()
+
         def record_service_baseline(baseline: ServiceStartResult) -> None:
             journal.service = baseline
             journal.phase = "service_starting"
@@ -952,6 +967,7 @@ class OnboardingCoordinator:
         if not self.readiness_checker():
             raise ProvisioningError("bridge service did not become ready")
         self._verify_owned_state(journal)
+        self._raise_if_abort_requested()
 
         journal.phase = "complete"
         self._write_journal(journal)
@@ -991,15 +1007,23 @@ class OnboardingCoordinator:
     def rollback_pending(self) -> None:
         """Rollback only this journal's owned fields; never replace whole state."""
 
-        with self._transaction_lock:
-            self._require_open()
-            journal = self._read_journal()
-            if journal is None:
-                return
-            if journal.phase == "complete":
-                self._cleanup_complete_locked(journal)
-                return
-            self._rollback_journal_locked(journal)
+        self._abort_requested.set()
+        try:
+            with self._transaction_lock:
+                self._require_open()
+                journal = self._read_journal()
+                if journal is None:
+                    return
+                if journal.phase == "complete":
+                    self._cleanup_complete_locked(journal)
+                    return
+                self._rollback_journal_locked(journal)
+        finally:
+            self._abort_requested.clear()
+
+    def _raise_if_abort_requested(self) -> None:
+        if self._abort_requested.is_set():
+            raise ProvisioningError("pending setup was aborted")
 
     def _remove_scoped_device(self, journal: _OnboardingJournal) -> None:
         if self.store.exists():
@@ -1670,7 +1694,9 @@ class PendingClaimApplication:
     expires_at: int = 0
     _device_id: str = field(default="", init=False, repr=False)
     _token_sha256: str = field(default="", init=False, repr=False)
-    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False
+    )
     claimed_event: threading.Event = field(default_factory=threading.Event)
     terminal_event: threading.Event = field(default_factory=threading.Event)
     ip_limiter: TokenBucketLimiter = field(
@@ -1710,15 +1736,42 @@ class PendingClaimApplication:
                 and hmac.compare_digest(digest, self._token_sha256)
             )
 
+    def _mark_rejected(self) -> None:
+        with self._lock:
+            self.status = "rejected"
+            # Wake both installer wait paths. A rejected request must not leave
+            # the local coordinator waiting until the original TTL elapses.
+            self.claimed_event.set()
+            self.terminal_event.set()
+
+    def abort(self, *, device_id: str, token: str) -> str:
+        """Idempotently rollback the transaction authenticated by its pending token."""
+
+        if not self.authenticate(device_id, token):
+            raise SetupSessionError("pending setup is unavailable")
+        self.coordinator.rollback_pending()
+        self._mark_rejected()
+        return "rejected"
+
     def claim(self, *, device_id: str, token: str) -> str:
         if not self.authenticate(device_id, token):
             raise SetupSessionError("pending setup is unavailable")
         with self._lock:
-            if self.status == "rejected" or self.expires_at <= int(time.time()):
-                self.status = "rejected"
-                self.terminal_event.set()
-                raise SetupSessionError("pending setup is unavailable")
-        status = self.coordinator.claim_pending(device_id=device_id, token=token)
+            rejected = self.status == "rejected"
+            expired = self.expires_at <= int(time.time())
+        if rejected:
+            raise SetupSessionError("pending setup is unavailable")
+        if expired:
+            # Expiry is a destructive terminal transition, not only an HTTP
+            # status. Remove the staged key, token and journal before rejecting.
+            self.coordinator.rollback_pending()
+            self._mark_rejected()
+            raise SetupSessionError("pending setup is unavailable")
+        try:
+            status = self.coordinator.claim_pending(device_id=device_id, token=token)
+        except SetupSessionError:
+            self._mark_rejected()
+            raise
         with self._lock:
             self.status = status
             self.claimed_event.set()
@@ -1793,10 +1846,13 @@ class PendingClaimRequestHandler(OnboardingRequestHandler):
         return self.server.app  # type: ignore[attr-defined,no-any-return]
 
     def do_GET(self) -> None:
-        self._handle_pending(claim=False)
+        self._handle_pending(operation="status")
 
     def do_POST(self) -> None:
-        self._handle_pending(claim=True)
+        if self.path == PENDING_ABORT_PATH:
+            self._handle_pending(operation="abort")
+        else:
+            self._handle_pending(operation="claim")
 
     def do_OPTIONS(self) -> None:
         self._method_not_allowed()
@@ -1810,9 +1866,7 @@ class PendingClaimRequestHandler(OnboardingRequestHandler):
 
     def _valid_host(self) -> bool:
         hosts = self.headers.get_all("Host", [])
-        return len(hosts) == 1 and hmac.compare_digest(
-            hosts[0], self.app.expected_host
-        )
+        return len(hosts) == 1 and hmac.compare_digest(hosts[0], self.app.expected_host)
 
     def _pending_credentials(self) -> tuple[str | None, str | None]:
         authorizations = self.headers.get_all("Authorization", [])
@@ -1834,8 +1888,14 @@ class PendingClaimRequestHandler(OnboardingRequestHandler):
             return None, None
         return device_id, token
 
-    def _handle_pending(self, *, claim: bool) -> None:
-        expected_path = PENDING_CLAIM_PATH if claim else PENDING_STATUS_PATH
+    def _handle_pending(
+        self, *, operation: Literal["status", "claim", "abort"]
+    ) -> None:
+        expected_path = {
+            "status": PENDING_STATUS_PATH,
+            "claim": PENDING_CLAIM_PATH,
+            "abort": PENDING_ABORT_PATH,
+        }[operation]
         if (
             self.path != expected_path
             or not self._valid_host()
@@ -1855,7 +1915,11 @@ class PendingClaimRequestHandler(OnboardingRequestHandler):
             )
             return
         device_id, token = self._pending_credentials()
-        if device_id is None or token is None or not self.app.authenticate(device_id, token):
+        if (
+            device_id is None
+            or token is None
+            or not self.app.authenticate(device_id, token)
+        ):
             self._send_json(
                 HTTPStatus.UNAUTHORIZED,
                 {"ok": False, "status": "rejected"},
@@ -1871,12 +1935,32 @@ class PendingClaimRequestHandler(OnboardingRequestHandler):
                 extra_headers={"Retry-After": str(retry_after)},
             )
             return
-        if claim:
+        if operation == "claim":
             try:
                 self.app.claim(device_id=device_id, token=token)
             except SetupSessionError:
-                self._send_json(HTTPStatus.GONE, self.app.public_status())
+                self._send_json(HTTPStatus.GONE, {"ok": False, "status": "rejected"})
                 return
+            except ProvisioningError:
+                self._send_json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "status": "rejected"},
+                )
+                return
+        elif operation == "abort":
+            try:
+                self.app.abort(device_id=device_id, token=token)
+            except SetupSessionError:
+                self._send_json(HTTPStatus.GONE, {"ok": False, "status": "rejected"})
+                return
+            except ProvisioningError:
+                self._send_json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "status": "rejected"},
+                )
+                return
+            self._send_json(HTTPStatus.OK, {"ok": False, "status": "rejected"})
+            return
         self._send_json(HTTPStatus.OK, self.app.public_status())
 
 
@@ -1970,6 +2054,8 @@ textarea{{min-height:150px}}button{{background:#377eff;color:white;font-weight:7
 const endpoint={endpoint},sessionId={session_id},setupCsrf={csrf};let setupToken={setup_token};
 const authHeaders=()=>({{'Authorization':'Setup '+setupToken,'Content-Type':'application/json','X-Setup-Session':sessionId,'X-CSRF-Token':setupCsrf}});
 async function keyDocument(){{const f=document.getElementById('keyFile').files[0];return f?await f.text():document.getElementById('keyText').value;}}
-async function saveOnlySafeValues(p){{const body=new URLSearchParams();body.set('setup_csrf',setupCsrf);body.set('ssid',document.getElementById('ssid').value);body.set('password',document.getElementById('wifiPassword').value);body.set('bridge_url',p.bridge_url);body.set('device_id',p.device_id);body.set('pending_token',p.pending_token);body.set('pending_expires_at',String(p.expires_at));const r=await fetch('http://192.168.4.1/save',{{method:'POST',mode:'cors',cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:body.toString()}});if(!r.ok)throw new Error('save');}}
-document.getElementById('setup').addEventListener('submit',async e=>{{e.preventDefault();const out=document.getElementById('status'),button=document.getElementById('finish'),text=document.getElementById('keyText'),file=document.getElementById('keyFile'),wifi=document.getElementById('wifiPassword');let key='';button.disabled=true;out.textContent='Saving securely…';try{{key=await keyDocument();const r=await fetch(endpoint,{{method:'POST',mode:'cors',cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer',headers:authHeaders(),body:key}});if(!r.ok)throw new Error('key');const pending=await r.json();setupToken='';await saveOnlySafeValues(pending);out.textContent='Saved. The display will reconnect and check the read-only key automatically.';}}catch(_error){{out.textContent='Setup could not be saved. Keep this installer running, verify the fields, and try again.';button.disabled=false;}}finally{{key='';text.value='';file.value='';wifi.value='';}}}});
+function safePendingBody(p){{const body=new URLSearchParams();body.set('setup_csrf',setupCsrf);body.set('bridge_url',p.bridge_url);body.set('device_id',p.device_id);body.set('pending_token',p.pending_token);return body;}}
+async function saveOnlySafeValues(p){{const body=safePendingBody(p);body.set('ssid',document.getElementById('ssid').value);body.set('password',document.getElementById('wifiPassword').value);body.set('pending_expires_at',String(p.expires_at));const r=await fetch('http://192.168.4.1/save',{{method:'POST',mode:'cors',cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:body.toString()}});if(!r.ok)throw new Error('save');}}
+async function abortPending(p){{if(!p)return;const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),6000);try{{await fetch('http://192.168.4.1/abort-pending',{{method:'POST',mode:'cors',cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer',signal:controller.signal,headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:safePendingBody(p).toString()}});}}catch(_error){{}}finally{{clearTimeout(timer);}}}}
+document.getElementById('setup').addEventListener('submit',async e=>{{e.preventDefault();const out=document.getElementById('status'),button=document.getElementById('finish'),text=document.getElementById('keyText'),file=document.getElementById('keyFile'),wifi=document.getElementById('wifiPassword');let key='',pending=null;button.disabled=true;out.textContent='Saving securely…';try{{key=await keyDocument();const r=await fetch(endpoint,{{method:'POST',mode:'cors',cache:'no-store',credentials:'omit',redirect:'error',referrerPolicy:'no-referrer',headers:authHeaders(),body:key}});key='';if(!r.ok)throw new Error('key');pending=await r.json();setupToken='';await saveOnlySafeValues(pending);pending=null;out.textContent='Saved. The display will reconnect and check the read-only key automatically.';}}catch(_error){{key='';text.value='';file.value='';wifi.value='';await abortPending(pending);out.textContent='Setup could not be saved. Keep this installer running, verify the fields, and try again.';button.disabled=false;}}finally{{key='';pending=null;text.value='';file.value='';wifi.value='';}}}});
 </script></body></html>"""
