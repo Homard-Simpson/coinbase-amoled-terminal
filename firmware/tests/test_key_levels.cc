@@ -12,6 +12,15 @@ int main() {
   assert(levels.count == KEY_LEVEL_CAPACITY);
   for (int i = 1; i < levels.count; ++i) assert(levels.values[i - 1] < levels.values[i]);
 
+  KeyLevels lower_first;
+  assert(add_key_level(lower_first, 100.0));
+  assert(!add_key_level(lower_first, 100.0 + 5e-8));
+  assert(lower_first.count == 1);
+  KeyLevels upper_first;
+  assert(add_key_level(upper_first, 100.0 + 5e-8));
+  assert(!add_key_level(upper_first, 100.0));
+  assert(upper_first.count == 1);
+
   double support = 0, resistance = 0;
   nearest_key_levels(levels, 97.0, support, resistance);
   assert(support == 95.0);

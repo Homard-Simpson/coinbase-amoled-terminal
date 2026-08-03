@@ -67,7 +67,9 @@ board variants, the bridge, documentation, and publication artifacts pass review
 
 - [ ] Build V1 from clean state.
 - [ ] Build V2 from clean state.
-- [ ] Run `./firmware/tests/run.sh` and verify control/UI/PMU contracts pass.
+- [ ] Run `./firmware/tests/run.sh` and verify control/UI/PMU contracts,
+  symmetric key-level deduplication, BOOT release boundaries, VBUS transitions,
+  and bounded semantic-version parsing pass.
 - [ ] Ensure artifact names contain the board variant and version.
 - [ ] Verify production provisioning was injected locally and generated headers
   were removed after each build.
@@ -81,18 +83,26 @@ board variants, the bridge, documentation, and publication artifacts pass review
   evidence.
 - [ ] Verify USB install writes only manifest-approved firmware regions and the
   dedicated onboarding partition; unrelated NVS remains byte-for-byte unchanged.
-- [ ] Verify the V2 binary contains no V1 AXP2101 transmit path.
+- [ ] Verify the V2 binary contains no V1 AXP2101 transmit path and both variants
+  allow only exact `0x08` writes to runtime PWRKEY registers `0x41`/`0x49`.
+- [ ] Verify manual OTA rejects non-NUL-terminated/invalid descriptor versions and
+  the automatic updater rejects oversized versions/components before parsing.
+- [ ] Verify one shared gate serializes manual OTA, automatic OTA, and full
+  standby, and OTA arming timeout cannot stop an active authenticated upload.
 
 ## 7. Hardware smoke test — V1
 
 - [ ] Correct V1 variant appears in sanitized boot output.
 - [ ] SH8601 panel initializes and remains stable.
 - [ ] FT5x06-family touch works across the screen.
-- [ ] Wi-Fi, HTTPS feed, stale/offline state, and reconnect pass.
+- [ ] Wi-Fi, HTTPS feed, stale/offline state, and reconnect pass, including the
+  reconnect-to-portal fallback timer after full-standby resume.
 - [ ] Wired recovery and OTA rollback path are available.
 - [ ] POWER short enters/wakes display-only standby with USB/VBUS and full
-  standby without VBUS; BOOT short blue action, BOOT 0.8–<10 second privacy
-  toggle, and continuous 10-second OTA arming remain unchanged.
+  standby without VBUS; insertion during full standby and removal during
+  display-only standby transition modes without reboot. BOOT short blue action,
+  BOOT 0.8–<10 second privacy toggle, and continuous detection or a release edge
+  at/after 10 seconds arm OTA without a privacy toggle.
 - [ ] Captive portal completes with a synthetic P-256 view-only test transport and
   clears the one-time onboarding partition after success.
 
@@ -101,17 +111,21 @@ board variants, the bridge, documentation, and publication artifacts pass review
 - [ ] Correct V2 variant appears in sanitized boot output.
 - [ ] CO5300 panel initializes without V1-specific PMU writes.
 - [ ] CST816S/CST820-family touch works across the screen.
-- [ ] Wi-Fi, HTTPS feed, stale/offline state, and reconnect pass.
+- [ ] Wi-Fi, HTTPS feed, stale/offline state, and reconnect pass, including the
+  reconnect-to-portal fallback timer after full-standby resume.
 - [ ] Wired recovery and OTA rollback path are available.
 - [ ] POWER short enters/wakes display-only standby with USB/VBUS and full
-  standby without VBUS; BOOT short blue action, BOOT 0.8–<10 second privacy
-  toggle, and continuous 10-second OTA arming remain unchanged.
-- [ ] Confirm V2 performs only the shared PWRKEY IRQ writes at runtime and no
-  V1-only AXP2101 rail write before, during, or after onboarding.
+  standby without VBUS; insertion during full standby and removal during
+  display-only standby transition modes without reboot. BOOT short blue action,
+  BOOT 0.8–<10 second privacy toggle, and continuous detection or a release edge
+  at/after 10 seconds arm OTA without a privacy toggle.
+- [ ] Confirm V2 performs only exact `0x08` writes to shared PWRKEY IRQ registers
+  `0x41`/`0x49` at runtime and no V1-only AXP2101 rail write before, during, or
+  after onboarding.
 - [ ] Verify a signed strictly newer V2 update installs, same/older/prerelease or
-  bad-signature artifacts fail closed, rollback works, battery-only full standby
-  cannot interrupt an active automatic update, and USB display-only standby
-  leaves the updater running.
+  bad-signature artifacts fail closed, rollback works, manual/automatic writers
+  cannot overlap, battery-only full standby cannot interrupt either update path,
+  and USB display-only standby leaves the updater running.
 - [ ] Captive portal completes with a synthetic P-256 view-only test transport and
   clears the one-time onboarding partition after success.
 

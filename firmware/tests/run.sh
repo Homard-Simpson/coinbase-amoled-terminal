@@ -12,7 +12,7 @@ mkdir -p "$OUT"
   -o "$OUT/config_validation_test"
 "$OUT/config_validation_test"
 
-for test in bollinger_bands control_policy key_levels ui_helpers; do
+for test in bollinger_bands control_policy key_levels ota_version_policy ui_helpers; do
   "${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror \
     -I"$ROOT/main" \
     "$ROOT/tests/test_${test}.cc" \

@@ -14,9 +14,22 @@ public releases begin.
   and V2 without moving its right edge.
 - Split POWER standby by live VBUS state: USB-powered devices turn off only the
   panel and touch input while networking, feed refresh, and signed V2 OTA remain
-  active; battery-only devices retain coordinated full standby.
+  active; battery-only devices retain coordinated full standby. Cable insertion
+  or removal now transitions an already-sleeping device to the correct mode.
 - Moved the battery and clock to symmetric 24-pixel top-bar anchors while
-  preserving every BOOT duration and action.
+  preserving every BOOT duration and action, including OTA arming on the
+  10-second release edge.
+- Made chart key-level near-duplicate rejection symmetric in production and
+  capture renderers.
+
+### Security
+
+- Serialized manual OTA, V2 automatic OTA, and full standby through one gate so
+  two writers cannot overlap and Wi-Fi cannot stop during a firmware write.
+- Bounded app-descriptor, release, and semantic-version components before board
+  identity/suffix checks, including non-NUL-terminated descriptor rejection.
+- Restored the Wi-Fi portal fallback timer after full-standby resume and narrowed
+  runtime AXP2101 PWRKEY writes to exact `0x08` values at `0x41`/`0x49`.
 
 ## [2.0.0] - 2026-08-02
 

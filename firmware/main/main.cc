@@ -51,6 +51,7 @@
 #include "nvs_flash.h"
 #include "network_portal.h"
 #include "onboarding_metadata.h"
+#include "ota_coordination.h"
 #include "runtime_config.h"
 #if !BOARD_IS_V1
 #include "auto_ota_v2.h"
@@ -270,18 +271,22 @@ static void history_window(char*b,size_t n,const Asset&a){
   else snprintf(b,n,"%luS WINDOW",(unsigned long)seconds);
 }
 static void flush_frame(){ for(int y=0;y<H;y+=TX_LINES){ int rows=std::min(TX_LINES,H-y); memcpy(txbuf,fb+y*W,W*rows*sizeof(uint16_t)); ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel,0,y,W,y+rows,txbuf)); if(xSemaphoreTake(tx_done,pdMS_TO_TICKS(2000))!=pdTRUE){ESP_LOGE(TAG,"LCD transfer timeout y=%d",y);break;} } }
-static uint8_t axp_read(uint8_t reg){ if(!axp_read_dev)return 0xFF; uint8_t v=0; return i2c_master_transmit_receive(axp_read_dev,&reg,1,&v,1,100)==ESP_OK?v:0xFF; }
-static void update_battery(){
-  if(!i2c_bus)return;
-  if(!axp_read_dev){i2c_device_config_t c={};c.dev_addr_length=I2C_ADDR_BIT_LEN_7;c.device_address=0x34;c.scl_speed_hz=400000;if(i2c_master_bus_add_device(i2c_bus,&c,&axp_read_dev)!=ESP_OK){axp_read_dev=nullptr;return;}}
-  uint8_t s1=axp_read(0x00),s2=axp_read(0x01),lvl=axp_read(0xA4);
-  if(s1==0xFF&&s2==0xFF&&lvl==0xFF){g_batt=Battery{};return;}
+static bool axp_read(uint8_t reg,uint8_t&value){
+  if(!axp_read_dev)return false;
+  return i2c_master_transmit_receive(axp_read_dev,&reg,1,&value,1,100)==ESP_OK;
+}
+static bool update_battery(){
+  if(!i2c_bus)return false;
+  if(!axp_read_dev){i2c_device_config_t c={};c.dev_addr_length=I2C_ADDR_BIT_LEN_7;c.device_address=0x34;c.scl_speed_hz=400000;if(i2c_master_bus_add_device(i2c_bus,&c,&axp_read_dev)!=ESP_OK){axp_read_dev=nullptr;return false;}}
+  uint8_t s1=0,s2=0,lvl=0;
+  if(!axp_read(0x00,s1)||!axp_read(0x01,s2)||!axp_read(0xA4,lvl))return false;
   int dir=(s2&0b01100000)>>5;               // 0 standby, 1 charging, 2 discharging
   g_batt.vbus=(s1&0x20)!=0;                  // STATUS1 bit5 = VBUS good
   g_batt.charging=(dir==1);
   g_batt.done=((s2&0b00000111)==0b00000100); // charge state = done
   g_batt.present=(dir==1||dir==2)||(lvl>=1&&lvl<=100);
   g_batt.level=std::max(0,std::min(100,(int)lvl));
+  return true;
 }
 // Deliberately narrow PMU write helper. Runtime writes on either board may only
 // enable the PWRKEY short interrupt or consume its latched W1C status bit.
@@ -292,12 +297,11 @@ static bool axp_irq_write(uint8_t reg,uint8_t val){
 static void axp_pkey_setup(){
   if(!i2c_bus)return;
   if(!axp_read_dev){i2c_device_config_t c={};c.dev_addr_length=I2C_ADDR_BIT_LEN_7;c.device_address=0x34;c.scl_speed_hz=400000;if(i2c_master_bus_add_device(i2c_bus,&c,&axp_read_dev)!=ESP_OK){axp_read_dev=nullptr;return;}}
-  uint8_t reg=0x41,en=0;
-  const bool read_ok=i2c_master_transmit_receive(axp_read_dev,&reg,1,&en,1,50)==ESP_OK;
-  const bool armed=read_ok&&axp_irq_write(0x41,en|0x08);
+  const bool armed=axp_irq_write(0x41,0x08);
   const bool cleared=axp_irq_write(0x49,0x08);
-  const uint8_t verify=axp_read(0x41);
-  if(armed&&cleared&&(verify&0x08))ESP_LOGI(TAG,"AXP PWRKEY short IRQ armed: INTEN2=0x%02x",verify);
+  uint8_t verify=0;
+  const bool verified=axp_read(0x41,verify)&&(verify&0x08);
+  if(armed&&cleared&&verified)ESP_LOGI(TAG,"AXP PWRKEY short IRQ armed: INTEN2=0x%02x",verify);
   else ESP_LOGE(TAG,"AXP PWRKEY short IRQ setup failed: INTEN2=0x%02x",verify);
 }
 static bool axp_pkey_short(){
@@ -952,18 +956,22 @@ static void fetch_task(void*){
 }
 // Full battery standby. No cross-variant-safe ESP32 wake GPIO for the AXP IRQ
 // has been verified, so workers and Wi-Fi stop while timer-sliced light sleep
-// polls latched INTSTS2 bit 3. USB power uses display-only standby in app_main.
+// polls latched INTSTS2 bit 3. Every slice also rechecks VBUS so USB insertion
+// transitions back to background-capable display-only standby without a reboot.
 static bool enter_full_standby(NetworkPortal& network){
   if(network.IsOtaArmed()||network.IsOtaBusy()){
     ESP_LOGW(TAG,"full POWER standby deferred while manual OTA is armed or active");
     return false;
   }
-#if !BOARD_IS_V1
-  if(!PauseV2AutomaticOtaForStandby(20000)){
-    ESP_LOGW(TAG,"full POWER standby deferred while automatic OTA is active");
+  FirmwareUpdateGuard update_guard(20000);
+  if(!update_guard){
+    ESP_LOGW(TAG,"full POWER standby deferred while a firmware update is active");
     return false;
   }
-#endif
+  if(network.IsOtaArmed()||network.IsOtaBusy()){
+    ESP_LOGW(TAG,"full POWER standby deferred by a newly active manual OTA");
+    return false;
+  }
   touch_input_enabled.store(false,std::memory_order_release);
   tap_x.store(-1,std::memory_order_release);
   tap_y.store(-1,std::memory_order_relaxed);
@@ -977,34 +985,37 @@ static bool enter_full_standby(NetworkPortal& network){
     xEventGroupClearBits(standby_events,STANDBY_REQUEST);
     set_screen(true);
     touch_input_enabled.store(true,std::memory_order_release);
-#if !BOARD_IS_V1
-    ResumeV2AutomaticOtaAfterStandby();
-#endif
     return false;
   }
   network.Suspend();
-  ESP_LOGI(TAG,"battery full standby entered by POWER: panel/feed/touch/Wi-Fi off; 250ms AXP 0x49 polling");
+  ESP_LOGI(TAG,"battery full standby entered: panel/feed/touch/Wi-Fi off; polling POWER and VBUS every 250ms");
   bool power_wake=false;
-  while(!power_wake){
+  PowerStandbyTransition transition=PowerStandbyTransition::kStay;
+  while(!power_wake&&transition==PowerStandbyTransition::kStay){
     ESP_ERROR_CHECK(esp_sleep_enable_timer_wakeup(kPowerPollSliceUs));
     const esp_err_t sleep_err=esp_light_sleep_start();
     if(sleep_err!=ESP_OK)ESP_LOGW(TAG,"standby light-sleep slice failed: %s",esp_err_to_name(sleep_err));
     power_wake=axp_pkey_short();  // only INTSTS2 0x49 bit 3 read + W1C consume
+    if(!power_wake){
+      const bool sample_valid=update_battery();
+      transition=power_standby_transition(PowerStandbyMode::kFull,sample_valid,g_batt.vbus);
+    }
   }
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
   network.Resume();
   force_fetch.store(true,std::memory_order_release);
   data_dirty.store(true,std::memory_order_release);
   xEventGroupClearBits(standby_events,STANDBY_REQUEST);
-  set_screen(true);
-  draw_locked();
-  tap_x.store(-1,std::memory_order_release);
-  tap_y.store(-1,std::memory_order_relaxed);
-  touch_input_enabled.store(true,std::memory_order_release);
-#if !BOARD_IS_V1
-  ResumeV2AutomaticOtaAfterStandby();
-#endif
-  ESP_LOGI(TAG,"battery full standby wake by POWER: Wi-Fi/tasks resumed and fresh fetch requested");
+  if(power_wake){
+    set_screen(true);
+    draw_locked();
+    tap_x.store(-1,std::memory_order_release);
+    tap_y.store(-1,std::memory_order_relaxed);
+    touch_input_enabled.store(true,std::memory_order_release);
+    ESP_LOGI(TAG,"battery full standby wake by POWER: screen/Wi-Fi/tasks resumed");
+  } else {
+    ESP_LOGI(TAG,"VBUS inserted during full standby: Wi-Fi/tasks resumed; panel remains off");
+  }
   return true;
 }
 extern "C" void app_main(){
@@ -1024,7 +1035,7 @@ extern "C" void app_main(){
   init_rest();
   state_mux=xSemaphoreCreateMutex();
   standby_events=xEventGroupCreate();
-  if(!state_mux||!standby_events)abort();
+  if(!state_mux||!standby_events||!InitializeFirmwareUpdateGate())abort();
 
   err=esp_ota_mark_app_valid_cancel_rollback();
   if(err!=ESP_OK&&err!=ESP_ERR_OTA_ROLLBACK_INVALID_STATE)
@@ -1041,7 +1052,7 @@ extern "C" void app_main(){
   xTaskCreate(fetch_task,"feed",12288,nullptr,4,nullptr);
   xTaskCreate(touch_task,"touch",3072,nullptr,6,nullptr);
 
-  ESP_LOGI(TAG,"controls: POWER short=standby/wake; BOOT short=blue action; BOOT 0.8-<10s=privacy; BOOT 10s=OTA");
+  ESP_LOGI(TAG,"controls: POWER short=standby/wake; BOOT short=blue action; BOOT 0.8-<10s=privacy; BOOT >=10s=OTA");
   uint64_t last_draw=esp_timer_get_time()/1000,button_at=0,last_batt=0,last_pkey=0;
   bool button_down=false,ota_hold_handled=false;
   bool shown_portal=network.IsPortalActive(),shown_armed=network.IsOtaArmed();
@@ -1064,18 +1075,23 @@ extern "C" void app_main(){
           touch_input_enabled.store(true,std::memory_order_release);
         } else {
           // Refresh VBUS at the button event instead of relying on the up-to-five-
-          // second-old top-bar sample. Battery presence never overrides VBUS.
-          update_battery();
-          const PowerStandbyMode mode=power_standby_mode(g_batt.vbus,g_batt.present);
-          if(mode==PowerStandbyMode::kDisplayOnly){
-            ESP_LOGI(TAG,"POWER short: entering USB display-only standby; Wi-Fi/feed/background tasks remain active");
-            touch_input_enabled.store(false,std::memory_order_release);
-            tap_x.store(-1,std::memory_order_release);
-            tap_y.store(-1,std::memory_order_relaxed);
-            set_screen(false);
+          // second-old top-bar sample. Battery presence never overrides VBUS, and
+          // an invalid PMU sample preserves the current awake mode.
+          const bool sample_valid=update_battery();
+          if(!sample_valid){
+            ESP_LOGW(TAG,"POWER standby deferred: unable to sample live VBUS state");
           } else {
-            ESP_LOGI(TAG,"POWER short: entering battery full standby");
-            enter_full_standby(network);
+            const PowerStandbyMode mode=power_standby_mode(g_batt.vbus,g_batt.present);
+            if(mode==PowerStandbyMode::kDisplayOnly){
+              ESP_LOGI(TAG,"POWER short: entering USB display-only standby; Wi-Fi/feed/background tasks remain active");
+              touch_input_enabled.store(false,std::memory_order_release);
+              tap_x.store(-1,std::memory_order_release);
+              tap_y.store(-1,std::memory_order_relaxed);
+              set_screen(false);
+            } else {
+              ESP_LOGI(TAG,"POWER short: entering battery full standby");
+              enter_full_standby(network);
+            }
           }
         }
         now=esp_timer_get_time()/1000;
@@ -1096,12 +1112,16 @@ extern "C" void app_main(){
 
     const bool pressed=gpio_get_level(GPIO_NUM_0)==0;
     if(pressed&&!button_down){button_at=now;ota_hold_handled=false;}
-    if(boot_should_arm_ota(pressed,now-button_at,ota_hold_handled)){
+    const uint64_t held=now-button_at;
+    if(boot_should_arm_ota(pressed,held,ota_hold_handled)){
       network.ArmOta();ota_hold_handled=true;need_draw=true;
       ESP_LOGI(TAG,"BOOT continuous 10s: manual OTA armed");
     }
+    if(boot_should_arm_ota_on_release(button_down,pressed,held,ota_hold_handled)){
+      network.ArmOta();ota_hold_handled=true;need_draw=true;
+      ESP_LOGI(TAG,"BOOT >=10s release edge: manual OTA armed");
+    }
     if(!pressed&&button_down&&!ota_hold_handled){
-      const uint64_t held=now-button_at;
       const BootReleaseAction action=boot_release_action(held,false);
       if(action==BootReleaseAction::kTogglePrivacy){
         const bool enabled=toggle_privacy();need_draw=screen_on;
@@ -1112,7 +1132,21 @@ extern "C" void app_main(){
       }
     }
     button_down=pressed;
-    if(now-last_batt>=5000){update_battery();last_batt=now;need_draw=true;}
+    const uint32_t battery_poll_ms=screen_on?5000:1000;
+    if(now-last_batt>=battery_poll_ms){
+      const bool sample_valid=update_battery();last_batt=now;need_draw=true;
+      const PowerStandbyTransition transition=power_standby_transition(
+          PowerStandbyMode::kDisplayOnly,sample_valid,g_batt.vbus);
+      if(!screen_on&&transition==PowerStandbyTransition::kToFull){
+        ESP_LOGI(TAG,"VBUS removed during display-only standby: entering battery full standby");
+        enter_full_standby(network);
+        now=esp_timer_get_time()/1000;
+        last_draw=last_batt=last_pkey=now;
+        shown_portal=network.IsPortalActive();
+        shown_armed=network.IsOtaArmed();
+        need_draw=false;
+      }
+    }
     if(now-last_draw>=1000)need_draw=true;
     if(need_draw&&screen_on){draw_locked();last_draw=now;}
     vTaskDelay(pdMS_TO_TICKS(20));
