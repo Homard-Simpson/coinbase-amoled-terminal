@@ -4,6 +4,7 @@
 #include <array>
 #include <cerrno>
 #include <cstdio>
+#include <cstdint>
 #include <cstring>
 #include <initializer_list>
 #include <string>
@@ -29,12 +30,15 @@
 #include "lwip/sockets.h"
 #include "nvs.h"
 #include "onboarding_metadata.h"
+#include "ota_coordination.h"
+#include "ota_version_policy.h"
 #include "runtime_config.h"
 
 namespace {
 constexpr char kTag[] = "network-portal";
 constexpr int kPortalFallbackSeconds = 45;
 constexpr int kOtaWindowSeconds = 300;
+constexpr int kOtaBusyRecheckSeconds = 5;
 constexpr size_t kMaxCredentials = 5;
 constexpr size_t kMaxFormBytes = 4096;
 constexpr size_t kMaxUploadBytes = 7 * 1024 * 1024;
@@ -44,6 +48,8 @@ constexpr char kBoardVersionSuffix[] = "-v1";
 #else
 constexpr char kBoardVersionSuffix[] = "-v2";
 #endif
+static_assert(sizeof(((esp_app_desc_t*)nullptr)->version) ==
+              terminal::ota::kAppVersionCapacity);
 
 struct Credential {
     std::string ssid;
@@ -351,11 +357,13 @@ std::string RenderPortalHtml() {
 }
 
 void RestartTask(void*) {
+    FirmwareUpdateGuard operation_guard(UINT32_MAX);
     vTaskDelay(pdMS_TO_TICKS(1500));
     esp_restart();
 }
 
 void FactoryResetTask(void*) {
+    FirmwareUpdateGuard operation_guard(UINT32_MAX);
     vTaskDelay(pdMS_TO_TICKS(1500));
     auto& portal = NetworkPortal::GetInstance();
     const RuntimeConfigSnapshot runtime = RuntimeConfig::GetInstance().Snapshot();
@@ -415,6 +423,12 @@ esp_err_t SaveHandler(httpd_req_t* req) {
         : FormValue(body, "csrf") == portal.GetCsrfToken();
     if (!csrf_valid)
         return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "Expired setup form; reload and try again");
+    FirmwareUpdateGuard operation_guard(0);
+    if (!operation_guard) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_send(req, "Firmware update or full standby already active",
+                               HTTPD_RESP_USE_STRLEN);
+    }
 
     const std::string ssid = FormValue(body, "ssid");
     const std::string password = FormValue(body, "password");
@@ -538,6 +552,11 @@ esp_err_t FactoryResetHandler(httpd_req_t* req) {
         return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "Expired setup form; reload and try again");
     if (FormValue(body, "confirm") != "RESET")
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Type RESET exactly to erase configuration");
+    FirmwareUpdateGuard operation_guard(0);
+    if (!operation_guard) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "Firmware update or full standby already active");
+    }
     httpd_resp_set_type(req, "text/plain");
     SetSecurityHeaders(req);
     httpd_resp_sendstr(req, "Configuration erased. The display will restart in first-boot setup mode.");
@@ -556,11 +575,17 @@ esp_err_t OtaHandler(httpd_req_t* req) {
         return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "Wrong one-time code");
     if (req->content_len < 1024 || static_cast<size_t>(req->content_len) > kMaxUploadBytes)
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid firmware size");
-    if (ota_upload_active.exchange(true)) {
+    FirmwareUpdateGuard update_guard(0);
+    if (!update_guard) {
         httpd_resp_set_status(req, "409 Conflict");
-        return httpd_resp_sendstr(req, "OTA upload already active");
+        return httpd_resp_sendstr(req, "Firmware update or full standby already active");
     }
+    ota_upload_active.store(true);
     OtaUploadGuard upload_guard;
+    // The OTA window can expire while this request waits for the shared gate.
+    if (!portal.IsOtaArmed() || portal.GetOtaCode() != code)
+        return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN,
+                                   "OTA authorization expired; arm it again");
 
     const esp_partition_t* update = esp_ota_get_next_update_partition(nullptr);
     if (!update || static_cast<size_t>(req->content_len) > update->size)
@@ -581,14 +606,24 @@ esp_err_t OtaHandler(httpd_req_t* req) {
     if (first_len < static_cast<int>(required_header))
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Truncated firmware header");
 
+    const auto* image = reinterpret_cast<const esp_image_header_t*>(buffer.data());
     const auto* desc = reinterpret_cast<const esp_app_desc_t*>(buffer.data() + app_desc_offset);
-    const std::string_view project(desc->project_name, strnlen(desc->project_name, sizeof(desc->project_name)));
-    const std::string_view version(desc->version, strnlen(desc->version, sizeof(desc->version)));
-    if (desc->magic_word != ESP_APP_DESC_MAGIC_WORD || project != kProjectName)
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Not an AMOLED terminal firmware image");
-    if (!EndsWith(version, kBoardVersionSuffix))
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Firmware image is for the other board revision");
-    const esp_app_desc_t new_app_desc = *desc;
+    std::string_view project;
+    std::string_view version;
+    if (image->magic != ESP_IMAGE_HEADER_MAGIC ||
+        desc->magic_word != ESP_APP_DESC_MAGIC_WORD ||
+        !terminal::ota::BoundedCStringView(desc->project_name,
+                                           sizeof(desc->project_name), &project) ||
+        project != kProjectName)
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Not an AMOLED terminal firmware image");
+    if (!terminal::ota::BoundedCStringView(desc->version, sizeof(desc->version),
+                                           &version) ||
+        version.size() <= strlen(kBoardVersionSuffix) ||
+        !terminal::ota::EndsWith(version, kBoardVersionSuffix))
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "Firmware image has an invalid board version");
+    const std::string accepted_version(version);
 
     esp_ota_handle_t handle = 0;
     esp_err_t err = esp_ota_begin(update, req->content_len, &handle);
@@ -616,7 +651,7 @@ esp_err_t OtaHandler(httpd_req_t* req) {
     }
 
     ESP_LOGI(kTag, "OTA accepted version=%s bytes=%d slot=%s",
-             new_app_desc.version, total, update->label);
+             accepted_version.c_str(), total, update->label);
     httpd_resp_set_type(req, "text/plain");
     SetSecurityHeaders(req);
     httpd_resp_sendstr(req, "Firmware validated. Restarting into the inactive slot.");
@@ -841,6 +876,16 @@ void NetworkPortal::ConnectionTimeout(void* arg) {
 
 void NetworkPortal::OtaTimeout(void* arg) {
     auto* self = static_cast<NetworkPortal*>(arg);
+    if (self->IsOtaBusy()) {
+        if (ota_timer) {
+            const esp_err_t err = esp_timer_start_once(
+                ota_timer, kOtaBusyRecheckSeconds * 1000000ULL);
+            if (err != ESP_OK)
+                ESP_LOGE(kTag, "unable to extend active OTA window: %s",
+                         esp_err_to_name(err));
+        }
+        return;
+    }
     self->ota_armed_ = false;
     {
         ScopedLock guard(self->state_lock_);
@@ -934,6 +979,10 @@ void NetworkPortal::StartPortal() {
 }
 
 void NetworkPortal::StopPortal() {
+    if (IsOtaBusy()) {
+        ESP_LOGW(kTag, "portal stop deferred while manual OTA is active");
+        return;
+    }
     if (!portal_active_.exchange(false)) return;
     ota_armed_ = false;
     {
@@ -997,7 +1046,16 @@ void NetworkPortal::Resume() {
     if (!suspended_.exchange(false)) return;
     const bool restore_portal = resume_portal_.exchange(false);
     const esp_err_t err = esp_wifi_start();
-    if (err == ESP_OK && restore_portal) StartPortal();
+    if (err == ESP_OK && restore_portal) {
+        StartPortal();
+    } else if (err == ESP_OK && connection_timer) {
+        esp_timer_stop(connection_timer);
+        const esp_err_t timer_err = esp_timer_start_once(
+            connection_timer, kPortalFallbackSeconds * 1000000ULL);
+        if (timer_err != ESP_OK)
+            ESP_LOGE(kTag, "unable to resume Wi-Fi fallback timer: %s",
+                     esp_err_to_name(timer_err));
+    }
     NotifyState();
     ESP_LOGI(kTag, "Wi-Fi resumed after POWER standby (%s)", esp_err_to_name(err));
 }

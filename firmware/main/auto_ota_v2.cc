@@ -20,10 +20,11 @@
 #include "esp_random.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "mbedtls/sha256.h"
 #include "network_portal.h"
+#include "ota_coordination.h"
+#include "ota_version_policy.h"
 #include "runtime_config.h"
 #include "sodium.h"
 
@@ -55,18 +56,13 @@ constexpr std::array<uint8_t, crypto_sign_PUBLICKEYBYTES> kReleasePublicKey = {
     0x96, 0x1b, 0x32, 0xd2, 0x52, 0xb2, 0x7e, 0x34,
     0xfc, 0xe3, 0xd2, 0x7f, 0x4b, 0x40, 0x4f, 0xf2,
 };
-SemaphoreHandle_t ota_gate = nullptr;
+
+using terminal::ota::SemanticVersion;
 
 struct HttpBody {
     std::vector<char> bytes;
     size_t maximum = 0;
     bool overflow = false;
-};
-
-struct SemanticVersion {
-    uint32_t major = 0;
-    uint32_t minor = 0;
-    uint32_t patch = 0;
 };
 
 struct UpdateCandidate {
@@ -81,47 +77,8 @@ bool ConstantTimeEqual(const uint8_t* left, const uint8_t* right, size_t size) {
     return sodium_memcmp(left, right, size) == 0;
 }
 
-bool EndsWith(std::string_view value, std::string_view suffix) {
-    return value.size() >= suffix.size() &&
-           value.substr(value.size() - suffix.size()) == suffix;
-}
-
-bool ParseStableVersion(std::string_view value, SemanticVersion* result) {
-    if (!result || value.empty()) return false;
-    SemanticVersion parsed;
-    uint32_t* fields[] = {&parsed.major, &parsed.minor, &parsed.patch};
-    size_t offset = 0;
-    for (size_t field = 0; field < 3; ++field) {
-        if (offset >= value.size() || !std::isdigit(static_cast<unsigned char>(value[offset])))
-            return false;
-        uint64_t number = 0;
-        size_t digits = 0;
-        while (offset < value.size() &&
-               std::isdigit(static_cast<unsigned char>(value[offset]))) {
-            number = number * 10 + static_cast<unsigned>(value[offset] - '0');
-            if (number > UINT32_MAX || ++digits > 10) return false;
-            ++offset;
-        }
-        *fields[field] = static_cast<uint32_t>(number);
-        if (field < 2) {
-            if (offset >= value.size() || value[offset] != '.') return false;
-            ++offset;
-        }
-    }
-    if (offset != value.size()) return false;  // Never auto-install prereleases.
-    *result = parsed;
-    return true;
-}
-
-bool IsNewer(const SemanticVersion& candidate, const SemanticVersion& current) {
-    if (candidate.major != current.major) return candidate.major > current.major;
-    if (candidate.minor != current.minor) return candidate.minor > current.minor;
-    return candidate.patch > current.patch;
-}
-
 bool ParseFirmwareVersion(std::string_view value, SemanticVersion* result) {
-    if (!EndsWith(value, kBoardSuffix)) return false;
-    return ParseStableVersion(value.substr(0, value.size() - strlen(kBoardSuffix)), result);
+    return terminal::ota::ParseBoardFirmwareVersion(value, kBoardSuffix, result);
 }
 
 bool DecodeHexSha256(const char* value, std::array<uint8_t, 32>* output) {
@@ -140,7 +97,7 @@ bool DecodeHexSha256(const char* value, std::array<uint8_t, 32>* output) {
 bool SafeArtifactName(std::string_view path) {
     if (path.empty() || path.size() > 160 || path.find('/') != std::string_view::npos ||
         path.find("..") != std::string_view::npos ||
-        !EndsWith(path, "-v2-application.bin"))
+        !terminal::ota::EndsWith(path, "-v2-application.bin"))
         return false;
     for (char c : path) {
         if (!std::isalnum(static_cast<unsigned char>(c)) && c != '.' && c != '_' && c != '-')
@@ -316,13 +273,21 @@ bool ParseCandidate(const std::vector<char>& bytes, UpdateCandidate* candidate) 
         UniqueString(v2, "firmware_version", &firmware_version) &&
         CountNamed(v2, "artifacts", &artifacts) == 1 && cJSON_IsArray(artifacts);
     SemanticVersion version;
-    if (!valid || !ParseFirmwareVersion(firmware_version, &version)) {
+    std::string_view release;
+    std::string_view firmware;
+    if (!valid ||
+        !terminal::ota::BoundedCStringView(
+            release_version, terminal::ota::kMaxReleaseVersionLength + 1, &release) ||
+        release.empty() ||
+        !terminal::ota::BoundedCStringView(
+            firmware_version, terminal::ota::kAppVersionCapacity, &firmware) ||
+        !ParseFirmwareVersion(firmware, &version)) {
         cJSON_Delete(root);
         return false;
     }
-    const std::string expected_release = "v" +
-        std::string(firmware_version, strlen(firmware_version) - strlen(kBoardSuffix));
-    if (expected_release != release_version) {
+    const std::string expected_release =
+        "v" + std::string(firmware.substr(0, firmware.size() - strlen(kBoardSuffix)));
+    if (expected_release != release) {
         cJSON_Delete(root);
         return false;
     }
@@ -330,7 +295,7 @@ bool ParseCandidate(const std::vector<char>& bytes, UpdateCandidate* candidate) 
     int applications = 0;
     UpdateCandidate parsed;
     parsed.semantic_version = version;
-    parsed.firmware_version = firmware_version;
+    parsed.firmware_version = firmware;
     cJSON* artifact = nullptr;
     cJSON_ArrayForEach(artifact, artifacts) {
         if (!cJSON_IsObject(artifact)) continue;
@@ -376,13 +341,21 @@ bool ValidateImageHeader(const std::vector<uint8_t>& prefix,
     constexpr size_t descriptor_offset = sizeof(esp_image_header_t) +
                                          sizeof(esp_image_segment_header_t);
     if (prefix.size() < descriptor_offset + sizeof(esp_app_desc_t)) return false;
-    const auto* descriptor = reinterpret_cast<const esp_app_desc_t*>(prefix.data() + descriptor_offset);
-    const std::string_view project(descriptor->project_name,
-        strnlen(descriptor->project_name, sizeof(descriptor->project_name)));
-    const std::string_view version(descriptor->version,
-        strnlen(descriptor->version, sizeof(descriptor->version)));
-    return descriptor->magic_word == ESP_APP_DESC_MAGIC_WORD && project == kProjectName &&
-           version == candidate.firmware_version && EndsWith(version, kBoardSuffix);
+    const auto* image = reinterpret_cast<const esp_image_header_t*>(prefix.data());
+    const auto* descriptor = reinterpret_cast<const esp_app_desc_t*>(
+        prefix.data() + descriptor_offset);
+    std::string_view project;
+    std::string_view version;
+    SemanticVersion parsed;
+    return image->magic == ESP_IMAGE_HEADER_MAGIC &&
+           descriptor->magic_word == ESP_APP_DESC_MAGIC_WORD &&
+           terminal::ota::BoundedCStringView(
+               descriptor->project_name, sizeof(descriptor->project_name), &project) &&
+           project == kProjectName &&
+           terminal::ota::BoundedCStringView(
+               descriptor->version, sizeof(descriptor->version), &version) &&
+           version == candidate.firmware_version &&
+           ParseFirmwareVersion(version, &parsed);
 }
 
 esp_err_t OtaEvent(esp_http_client_event_t* event) {
@@ -489,10 +462,15 @@ bool DownloadAndInstall(const UpdateCandidate& candidate) {
 bool CheckForUpdate() {
     const esp_app_desc_t* running = esp_app_get_description();
     SemanticVersion current;
-    if (!running || std::string_view(running->project_name,
-            strnlen(running->project_name, sizeof(running->project_name))) != kProjectName ||
-        !ParseFirmwareVersion(std::string_view(running->version,
-            strnlen(running->version, sizeof(running->version))), &current)) {
+    std::string_view running_project;
+    std::string_view running_version;
+    if (!running ||
+        !terminal::ota::BoundedCStringView(
+            running->project_name, sizeof(running->project_name), &running_project) ||
+        running_project != kProjectName ||
+        !terminal::ota::BoundedCStringView(
+            running->version, sizeof(running->version), &running_version) ||
+        !ParseFirmwareVersion(running_version, &current)) {
         ESP_LOGE(kTag, "running firmware identity is not eligible for automatic OTA");
         return false;
     }
@@ -513,7 +491,7 @@ bool CheckForUpdate() {
         ESP_LOGE(kTag, "release manifest is not production-ready for V2");
         return false;
     }
-    if (!IsNewer(candidate.semantic_version, current)) {
+    if (!terminal::ota::IsNewer(candidate.semantic_version, current)) {
         ESP_LOGI(kTag, "no strictly newer stable V2 firmware is available");
         return true;
     }
@@ -534,13 +512,15 @@ void AutomaticOtaTask(void*) {
     vTaskDelay(pdMS_TO_TICKS(initial * 1000));
     while (true) {
         bool checked = false;
-        if (ota_gate && xSemaphoreTake(ota_gate, portMAX_DELAY) == pdTRUE) {
-            auto& portal = NetworkPortal::GetInstance();
-            const bool eligible = portal.IsConnected() && !portal.IsPortalActive() &&
-                                  !portal.IsOtaArmed() &&
-                                  RuntimeConfig::GetInstance().IsProvisioned();
-            checked = eligible && CheckForUpdate();
-            xSemaphoreGive(ota_gate);
+        {
+            FirmwareUpdateGuard update_guard(1000);
+            if (update_guard) {
+                auto& portal = NetworkPortal::GetInstance();
+                const bool eligible = portal.IsConnected() && !portal.IsPortalActive() &&
+                                      !portal.IsOtaArmed() && !portal.IsOtaBusy() &&
+                                      RuntimeConfig::GetInstance().IsProvisioned();
+                checked = eligible && CheckForUpdate();
+            }
         }
         const uint32_t delay = checked ? kCheckIntervalSeconds : kRetrySeconds;
         vTaskDelay(pdMS_TO_TICKS(delay * 1000));
@@ -553,23 +533,6 @@ void StartV2AutomaticOta() {
         ESP_LOGE(kTag, "cryptographic self-initialization failed; automatic OTA disabled");
         return;
     }
-    ota_gate = xSemaphoreCreateMutex();
-    if (!ota_gate) {
-        ESP_LOGE(kTag, "unable to create automatic OTA standby gate");
-        return;
-    }
-    if (xTaskCreate(AutomaticOtaTask, "auto_ota_v2", 12288, nullptr, 3, nullptr) != pdPASS) {
+    if (xTaskCreate(AutomaticOtaTask, "auto_ota_v2", 12288, nullptr, 3, nullptr) != pdPASS)
         ESP_LOGE(kTag, "unable to start automatic OTA task");
-        vSemaphoreDelete(ota_gate);
-        ota_gate = nullptr;
-    }
-}
-
-bool PauseV2AutomaticOtaForStandby(uint32_t timeout_ms) {
-    if (!ota_gate) return true;
-    return xSemaphoreTake(ota_gate, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
-}
-
-void ResumeV2AutomaticOtaAfterStandby() {
-    if (ota_gate) xSemaphoreGive(ota_gate);
 }

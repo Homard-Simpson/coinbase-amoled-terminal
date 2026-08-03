@@ -81,6 +81,16 @@ class PublicSafetyScannerTests(unittest.TestCase):
         self.assertEqual(report.findings, ())
         self.assertEqual(report.files_scanned, 1)
 
+    def test_git_worktree_pointer_is_not_scanned(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            personal_path = "/" + "/".join(("Users", "specific-person", "worktree"))
+            (root / ".git").write_text(f"gitdir: {personal_path}\n", encoding="utf-8")
+            (root / "safe.txt").write_text("placeholder only", encoding="utf-8")
+            report = SCANNER.scan_paths([root])
+        self.assertEqual(report.findings, ())
+        self.assertEqual(report.files_scanned, 1)
+
     def test_external_directory_symlink_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             base = Path(temporary_directory)

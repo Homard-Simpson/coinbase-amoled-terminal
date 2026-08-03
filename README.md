@@ -103,11 +103,18 @@ credentials, configuration, and device tokens.
   checks run again; saved NVS is preserved.
 - **Automatic V2 update:** V2 checks the official release channel in the
   background and installs only a strictly newer stable V2 application whose
-  board identity, version, size, and SHA-256 are authenticated by the pinned
-  Ed25519 release key. V1 remains manual-update only.
-- **Physical controls:** POWER short press enters/wakes standby. BOOT short press
-  activates the blue bottom button, BOOT release after 0.8 to under 10 seconds
-  toggles privacy mode, and an uninterrupted 10-second BOOT hold arms manual OTA.
+  project/board identity, bounded semantic version, size, and SHA-256 are
+  authenticated by the pinned Ed25519 release key. One shared gate prevents
+  manual OTA, automatic OTA, and battery standby from racing. V1 remains
+  manual-update only.
+- **Physical controls:** POWER short press enters/wakes standby. With USB/VBUS,
+  standby turns off only the panel and touch input while networking, feed refresh,
+  and signed V2 OTA stay active. On battery, full standby pauses those services
+  and uses light sleep. VBUS is rechecked while asleep, so cable insertion or
+  removal transitions to the correct mode without a reboot. BOOT short press
+  still activates the blue bottom button, BOOT release after 0.8 to under 10
+  seconds toggles privacy mode, and a continuous hold or release edge at 10
+  seconds or later arms manual OTA.
 - **Setup expired or interrupted:** reconnect USB and rerun the same command. New
   local state is rolled back unless the display confirms its final save.
 - **Lost display:** revoke that display's token on the bridge. The Coinbase key
@@ -173,8 +180,9 @@ endorsement. See [commercial licensing](COMMERCIAL-LICENSING.md).
 - Shows selected public market prices, compact history, and read-only portfolio
   data on a 368 × 448 AMOLED display.
 - Supports the Waveshare ESP32-S3 Touch AMOLED 1.8 V1 and V2 hardware revisions.
-- Preserves the same POWER standby/wake and BOOT action/privacy/manual-OTA
-  controls on both board revisions.
+- Uses transition-aware VBUS standby on both revisions: display-only while
+  USB-powered and coordinated full standby on battery, including live cable
+  insertion/removal, without changing the BOOT action/privacy/manual-OTA contract.
 - Keeps Coinbase API credentials on a bridge you control.
 - Gives the display only a separate, scoped device-feed token.
 - Supports local-network or private-tailnet deployments by default.

@@ -20,7 +20,7 @@ Do not treat V1 and V2 as interchangeable firmware targets.
 | Expected flash configuration | 16 MB | 16 MB |
 | Expected external RAM | Octal PSRAM | Octal PSRAM |
 | Display/IO sequencing | TCA9554 and V1-specific AXP2101 rail sequencing | TCA9554 reset; no V1 PMU rail writes |
-| Shared runtime power control | AXP2101 PWRKEY IRQ registers `0x41`/`0x49` only | AXP2101 PWRKEY IRQ registers `0x41`/`0x49` only |
+| Shared runtime power control | Exact `0x08` PWRKEY IRQ writes to AXP2101 `0x41`/`0x49` only | Exact `0x08` PWRKEY IRQ writes to AXP2101 `0x41`/`0x49` only |
 | Touch polling note | Interrupt-gated reads avoid idle NACK behavior | Event-oriented controller can be polled by the compatible driver path |
 | Project status | Supported; hardware smoke test required per release | Supported; hardware smoke test required per release |
 
@@ -33,8 +33,8 @@ title.
 V1-specific PMU initialization writes must not run on V2. They can blank or
 destabilize the CO5300 display path. The shared source therefore uses an explicit
 compile-time board selector rather than probing both controller families at boot.
-The only cross-variant runtime PMU writes are the proven PWRKEY short-press IRQ
-enable/consume operations; the write allowlist cannot address rail registers
+The only cross-variant runtime PMU writes are exact `0x08` PWRKEY short-press IRQ
+enable/consume operations at `0x41`/`0x49`; the write allowlist cannot address rail registers
 `0x80` through `0x99`.
 
 If the display goes blank immediately after initialization:
@@ -98,18 +98,25 @@ Run these on both revisions before marking a release supported:
 - boot log identifies the intended variant;
 - panel initializes without reset loops, corruption, or unexpected blanking;
 - brightness and screen on/off behavior work;
-- POWER short press enters/wakes standby with panel, Wi-Fi, feed, and touch
-  paused/resumed;
+- with USB/VBUS present, POWER short press enters/wakes display-only standby:
+  panel and touch input stop while Wi-Fi, feed, and V2 updates continue;
+- without VBUS, POWER short press enters/wakes full standby with panel, Wi-Fi,
+  feed, and touch paused/resumed;
+- inserting USB during full standby resumes Wi-Fi/feed into display-only standby,
+  and removing USB during display-only standby enters full standby;
 - BOOT short activates the blue bottom action, 0.8–<10 seconds toggles privacy,
-  and uninterrupted 10 seconds arms manual OTA without a privacy toggle;
+  and both continuous detection and release at/after 10 seconds arm manual OTA
+  without a privacy toggle;
 - touch coordinates reach every intended control region;
-- Wi-Fi provisioning and reconnect work after power cycle;
+- Wi-Fi provisioning and reconnect work after power cycle and full-standby resume,
+  including the reconnect-to-portal fallback timer;
 - HTTPS feed authentication succeeds with a test feed;
 - malformed and stale feeds show safe error states;
 - background refresh does not starve touch input;
 - OTA rollback or wired recovery is available; and
-- V2 signed automatic OTA does not race POWER standby; V1 has no automatic
-  updater; and
+- manual OTA and V2 signed automatic OTA cannot overlap or race battery-only full
+  standby, an active upload survives its arming timeout, and V2 updating continues
+  through USB display-only standby; V1 has no automatic updater; and
 - no credential, token, or unique hardware identifier appears in logs/artifacts.
 
 Record only generic pass/fail results in public release notes. Keep serial numbers,

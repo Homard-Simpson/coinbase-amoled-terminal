@@ -25,15 +25,19 @@ Check the seller listing, packaging, board marking, or Waveshare factory-example
 - Open positions are taller, color-accented, and show an emphasized live price.
 - Tap an asset for an expanded OHLCV chart. Candle body width scales with volume; no separate volume histogram is used.
 - Entry and live-price guide lines, subtle light-blue left-side chart levels, list sparklines, and closed-today rows.
-- A single top row with battery/charge state at left and bridge-local current time at right in 12-hour AM/PM format.
+- A single top row with battery/charge state and bridge-local 12-hour time on symmetric 24-pixel left/right anchors.
 - Dedicated 10 ms touch task so network requests and frame transfers do not drop taps.
-- **Short POWER/PWRKEY press:** enter standby; a second POWER press wakes. The
-  panel, feed/touch workers, and Wi-Fi pause while RAM/UI state is retained.
+- **Short POWER/PWRKEY press:** enter standby; a second POWER press wakes. When
+  VBUS is present, only the panel and touch input stop; Wi-Fi, feed refresh, and
+  the signed V2 updater remain active. Without VBUS, full standby pauses the
+  panel, feed/touch workers, and Wi-Fi while RAM/UI state is retained. Live VBUS
+  rechecks move an already-sleeping device between these modes after cable
+  insertion or removal.
 - **Short BOOT press:** activate the current blue bottom action (toggle Prices /
   Positions, or leave a chart).
 - **BOOT release after 0.8 to under 10 seconds:** toggle privacy mode.
-- **BOOT hold continuously for 10 seconds:** arm local OTA for five minutes
-  without also toggling privacy.
+- **BOOT hold continuously for 10 seconds, or release at/after that boundary:**
+  arm local OTA for five minutes without also toggling privacy.
 
 ## Security model
 
@@ -45,9 +49,18 @@ Check the seller listing, packaging, board marking, or Waveshare factory-example
 - HTTPS uses the ESP-IDF certificate bundle. Plain HTTP is accepted only for RFC1918, link-local, loopback, CGNAT/tailnet, `.local`, `.lan`, `.home.arpa`, `.internal`, or single-label LAN hosts.
 - Feed bodies are capped at 192 KiB. Candle storage is capped at 36 per symbol; closed-today storage is capped at 20 rows.
 - The entire response is rejected unless `read_only` is the JSON boolean `true`. Missing, `false`, string, or numeric values fail closed and do not replace the last trusted state.
-- Manual OTA requires physical presence plus a six-digit one-time code. V2 also checks the official latest-release endpoint in the background and accepts only a strictly newer stable V2 application whose SHA-256 is bound to a production-ready Ed25519-signed manifest. POWER standby takes an updater gate first, so Wi-Fi cannot be stopped during an authenticated inactive-slot write; manual-OTA arming likewise defers standby. Both update paths use dual slots and ESP-IDF rollback. This protects network updates, but it is not a substitute for hardware Secure Boot against a physical attacker.
-- Runtime AXP2101 writes on both boards are restricted to enabling and consuming
-  the physical PWRKEY short-press interrupt (`0x41` bit 3 and `0x49 = 0x08`).
+- Manual OTA requires physical presence plus a six-digit one-time code. V2 also
+  checks the official latest-release endpoint in the background and accepts only
+  a strictly newer stable V2 application whose SHA-256 is bound to a
+  production-ready Ed25519-signed manifest. One shared exclusion gate covers
+  manual OTA, automatic OTA, and battery-only full standby, so writers cannot
+  overlap and Wi-Fi cannot stop during an inactive-slot write. Descriptor and
+  manifest versions are bounded before board-suffix and semantic-version checks.
+  USB display-only standby leaves networking and the updater running. Both update
+  paths use dual slots and ESP-IDF rollback. This protects network updates, but
+  it is not a substitute for hardware Secure Boot against a physical attacker.
+- Runtime AXP2101 writes on both boards are exact `0x08` writes to enable and
+  consume the physical PWRKEY short-press interrupt (`0x41` and `0x49` only).
   V1-only rail sequencing remains compile-time isolated from V2.
 
 The NVS token is a revocable **bridge credential**, not a Coinbase credential. Never paste Coinbase API keys, API secrets, private keys, or session cookies into the portal.
@@ -156,16 +169,16 @@ Compact candles use `[timestamp, open, high, low, close, volume]`. Object candle
 
 ### Automatic V2 updates
 
-After a randomized startup delay, V2 checks the official GitHub latest-release endpoint every six hours. It installs only when the release manifest and detached Ed25519 signature authenticate under the pinned release key, all production/control/V2-hardware readiness flags are true, the release is a strictly newer stable semantic version, and the downloaded V2 application matches the signed size, SHA-256, project, board suffix, and app version. Redirects are permitted only in this signed-download path; an altered payload cannot pass the pinned signature and digest checks. Failed checks or transfers leave the current slot selected, and ESP-IDF rollback remains enabled. POWER standby waits for the updater gate and stays awake rather than interrupting an active check/write.
+After a randomized startup delay, V2 checks the official GitHub latest-release endpoint every six hours. It installs only when the release manifest and detached Ed25519 signature authenticate under the pinned release key, all production/control/V2-hardware readiness flags are true, the release is a strictly newer stable bounded semantic version, and the downloaded V2 application matches the signed size, SHA-256, project, board suffix, and app version. Redirects are permitted only in this signed-download path; an altered payload cannot pass the pinned signature and digest checks. Failed checks or transfers leave the current slot selected, and ESP-IDF rollback remains enabled. The same gate serializes automatic and manual writers and battery-only full standby, so full standby waits or stays awake rather than interrupting an active check/write. USB display-only standby does not stop Wi-Fi or the updater.
 
 V1 does not compile or run the automatic updater. Prereleases and same/older versions are never installed automatically.
 
 ### Manual recovery/update
 
 1. Build the image for the device revision.
-2. While the display is awake, hold BOOT continuously for 10 seconds. The display shows a six-digit code for five minutes.
+2. While the display is awake, hold BOOT to the 10-second boundary (continuous detection or the release edge). The display shows a six-digit code for five minutes.
 3. Join the displayed setup AP, open `http://192.168.4.1`, choose `coinbase_amoled_terminal.bin`, and enter the code.
-4. The firmware verifies project identity, board suffix, size, and complete ESP-IDF image before selecting the inactive slot and restarting.
+4. The firmware verifies bounded project/version identity, board suffix, size, and the complete ESP-IDF image before selecting the inactive slot and restarting.
 
 A failed or interrupted upload leaves the running slot selected. Manual OTA remains available independently of automatic update checks.
 

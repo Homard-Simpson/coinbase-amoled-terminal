@@ -4,10 +4,11 @@ set(terminal_sources
     "runtime_config.cc"
     "config_validation.cc"
     "onboarding_metadata.cc"
+    "ota_coordination.cc"
 )
 
-# Automatic release checks are intentionally V2-only. Keep the V1 source set and
-# runtime behavior unchanged.
+# Automatic release checks and libsodium remain V2-only. The coordinator above
+# is shared so manual OTA and full standby are mutually exclusive on both boards.
 set(terminal_private_requires "")
 if(CONFIG_TERMINAL_BOARD_V2)
     list(APPEND terminal_sources "auto_ota_v2.cc")

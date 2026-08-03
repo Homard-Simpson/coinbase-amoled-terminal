@@ -20,6 +20,8 @@ from pathlib import Path
 
 DEFAULT_MAX_BYTES = 5 * 1024 * 1024
 
+EXCLUDED_FILES = frozenset({".git"})
+
 EXCLUDED_DIRECTORIES = frozenset(
     {
         ".git",
@@ -324,6 +326,8 @@ def _iter_files(inputs: Sequence[Path]) -> Iterator[tuple[Path, Path]]:
                 and not (Path(current) / directory).is_symlink()
             )
             for filename in sorted(filenames):
+                if filename in EXCLUDED_FILES:
+                    continue
                 candidate = Path(current) / filename
                 yield candidate, root
 

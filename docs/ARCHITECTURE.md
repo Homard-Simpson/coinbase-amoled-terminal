@@ -103,15 +103,23 @@ The firmware:
 - renders last-known-good data with clear stale/offline states, bridge-local
   fixed-width 12-hour time, privacy mode, and muted chart-axis prices;
 - selects V1 or V2 hardware support at build time;
-- maps POWER short press to coordinated standby/wake and BOOT to the current blue
+- maps POWER short press to VBUS-aware standby/wake and BOOT to the current blue
   action, privacy, or manual OTA based on exact hold duration; and
 - on V2 only, periodically authenticates the production-ready latest release with
   the pinned Ed25519 manifest key and installs only a strictly newer stable V2
   application after signed size, SHA-256, project, version, and board checks.
 
-POWER standby takes the V2 updater gate before pausing Wi-Fi, feed, touch, and
-the panel. It waits or remains awake instead of interrupting an inactive-slot
-write. V1 does not compile the automatic updater.
+POWER samples live AXP2101 VBUS state at the button event and continues sampling
+while the screen is off. With VBUS present it turns off only the panel and touch
+input, so Wi-Fi, feed refresh, portal state, and signed V2 OTA continue. Without
+VBUS it takes a firmware-update gate before pausing Wi-Fi, feed, touch, and the
+panel for full standby; USB insertion resumes the workers into display-only mode,
+and USB removal promotes display-only mode to full standby. Invalid PMU samples
+preserve the current mode. The same gate serializes manual OTA, V2 automatic OTA,
+and full standby, preventing two writers or a Wi-Fi shutdown during a write.
+Battery presence never overrides VBUS. V1 does not compile the automatic updater.
+Descriptor strings and semantic-version components are length-bounded before
+identity, suffix, and ordering checks.
 
 It never receives a Coinbase API key and has no code path for order or transfer
 operations.
@@ -249,8 +257,8 @@ The firmware source is shared, but hardware-specific code is selected explicitly
 - `v2`: CO5300 display and CST816S/CST820-family touch path, avoiding V1-only PMU
   rail writes.
 
-Both builds use only AXP2101 `0x41` bit-3 enable and `0x49 = 0x08` write-one-to-
-clear at runtime for the physical PWRKEY short-press event. The allowlist cannot
+Both builds use exact AXP2101 `0x41 = 0x08` enable and `0x49 = 0x08` write-one-
+to-clear values at runtime for the physical PWRKEY short-press event. The allowlist cannot
 address rail-control registers `0x80` through `0x99`.
 
 CI builds both variants from clean state without credentials or per-device

@@ -6,6 +6,17 @@
 #include <ctime>
 
 // Deterministic helpers shared by the firmware UI and host tests.
+constexpr int kTopBarSafeInsetPx = 24;
+
+struct TopBarAnchors {
+  int left;
+  int right;
+};
+
+constexpr TopBarAnchors top_bar_anchors(int display_width) {
+  return {kTopBarSafeInsetPx, display_width - kTopBarSafeInsetPx};
+}
+
 inline double chart_level_value(double low, double high, int level, int intervals) {
   if (!std::isfinite(low) || !std::isfinite(high) || intervals <= 0) return 0;
   if (level < 0) level = 0;

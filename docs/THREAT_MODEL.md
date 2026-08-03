@@ -24,8 +24,9 @@ this threat model is no longer sufficient.
    hardware revision.
 9. Automatic firmware updates cannot install an unauthenticated, cross-board,
    same/older, prerelease, truncated, or digest-mismatched application.
-10. POWER standby cannot interrupt a V2 automatic OTA write or reuse BOOT for an
-    unrelated power action.
+10. Manual OTA, V2 automatic OTA, and battery-only full standby cannot race;
+    live USB insertion/removal reaches the correct standby mode, and neither mode
+    reuses BOOT for an unrelated power action.
 
 ## Assets
 
@@ -164,7 +165,8 @@ panel/touch/PMU behavior.
 
 **Controls:** explicit variant names, separate artifacts, boot-time variant label,
 dual CI builds, release manifest, hardware checklist, compile-time isolation of
-V1 rail writes, and a narrow cross-variant PWRKEY IRQ write allowlist.
+V1 rail writes, and exact `0x08`-only cross-variant PWRKEY IRQ writes to `0x41`
+and `0x49`.
 
 **Residual risk:** manual flashing can still select the wrong file. Physical board
 identification remains an operator responsibility.
@@ -172,16 +174,21 @@ identification remains an operator responsibility.
 ### Firmware update substitution or interruption
 
 **Paths:** compromised release metadata, a substituted binary, downgrade,
-cross-board image, truncated transfer, or POWER standby during an inactive-slot
-write.
+cross-board image, unterminated descriptor fields, oversized semantic-version
+components, truncated transfer, overlapping writers, or POWER standby during an
+inactive-slot write.
 
 **Controls:** V2 pins an Ed25519 manifest key and requires production/control/V2
 hardware evidence, a strictly newer stable semantic version, exact project and
 `-v2` identity, signed size and SHA-256, complete ESP-IDF image validation,
-dual-slot selection, and rollback. The automatic updater holds a standby gate
-through metadata checks and image writing; POWER standby waits or stays awake.
-Manual OTA remains physically armed and defers standby while its window is open.
-V1 has no automatic updater.
+dual-slot selection, and rollback. Descriptor and manifest versions are bounded
+before suffix/semantic parsing. One gate serializes manual OTA, automatic OTA,
+and full standby from metadata checks through image writing; battery-only full
+standby waits or stays awake. USB display-only standby leaves Wi-Fi and the
+updater running, live VBUS checks transition either direction, and the portal's
+Wi-Fi fallback timer is restarted after full-standby resume. Manual OTA remains
+physically armed and cannot be interrupted by its arming timeout once writing has
+started. V1 has no automatic updater.
 
 **Residual risk:** baseline boards do not enable Secure Boot or flash encryption,
 so physical possession can replace firmware. GitHub, CI, the signing key, and the

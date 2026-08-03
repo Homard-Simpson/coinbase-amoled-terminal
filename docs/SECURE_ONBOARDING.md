@@ -188,10 +188,12 @@ NVS region.
 - **Uninstall:** removes the user service and application. Private data is retained
   unless `--purge` is explicitly supplied.
 
-The physical controls remain separate: POWER short press enters/wakes standby;
+The physical controls remain separate: POWER short press enters/wakes VBUS-aware
+standby and live cable changes transition between display-only and full modes;
 BOOT short activates the current blue bottom action; BOOT release after 0.8 to
-under 10 seconds toggles privacy; and an uninterrupted 10-second BOOT hold arms
-local OTA for five minutes without toggling privacy.
+under 10 seconds toggles privacy; and continuous detection or release at/after 10
+seconds arms local OTA for five minutes without toggling privacy. Manual OTA uses
+the shared firmware-update/full-standby gate before accepting an image write.
 
 ## Verification boundary and current release status
 
