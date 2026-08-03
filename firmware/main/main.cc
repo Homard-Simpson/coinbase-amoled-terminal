@@ -95,7 +95,7 @@ enum { ST_STARTING=0, ST_UPDATED, ST_NOWIFI, ST_UNCONFIGURED, ST_HTTPERR,
        ST_JSONERR, ST_TOO_LARGE, ST_UNSAFE, ST_PENDING_NETWORK,
        ST_PENDING_CHECK, ST_PENDING_READY, ST_PENDING_REJECTED };
 static std::atomic_int feed_status{ST_STARTING},feed_http_code{0};
-static std::atomic_bool data_dirty{true};
+static std::atomic_bool data_dirty{true},touch_input_enabled{true};
 static SemaphoreHandle_t state_mux=nullptr;
 static EventGroupHandle_t standby_events=nullptr;
 static constexpr EventBits_t STANDBY_REQUEST=BIT0, FEED_IDLE=BIT1, TOUCH_IDLE=BIT2;
@@ -364,7 +364,8 @@ static void draw(){
   const uint64_t now=esp_timer_get_time()/1000;
   const uint64_t stale_after=std::max<uint64_t>(MIN_STALE_MS,(uint64_t)feed_refresh_seconds*2500ULL);
   const bool stale=last_ok_ms&&now-last_ok_ms>stale_after;
-  draw_battery(16,10);
+  constexpr TopBarAnchors top_bar=top_bar_anchors(W);
+  draw_battery(top_bar.left,10);
   const int current_status=feed_status.load();
   const bool feed_problem=current_status!=ST_UPDATED&&current_status!=ST_STARTING;
   char status[24]{};
@@ -384,7 +385,7 @@ static void draw(){
     else snprintf(status,sizeof(status),"FEED ERR");
   } else if(privacy_mode)snprintf(status,sizeof(status),"PRIVATE");
   if(status[0])text_center(120,132,12,status,AMBER,2);
-  text_right(352,12,display_time.c_str(),AXIS_BLUE,2);
+  text_right(top_bar.right,12,display_time.c_str(),AXIS_BLUE,2);
   int top=58;
   if(selected_chart>=0){
     auto&a=assets[selected_chart];
@@ -584,6 +585,11 @@ static void touch_task(void*){
       xEventGroupSetBits(standby_events,TOUCH_IDLE);
       while(xEventGroupGetBits(standby_events)&STANDBY_REQUEST)vTaskDelay(pdMS_TO_TICKS(20));
       xEventGroupClearBits(standby_events,TOUCH_IDLE);
+      continue;
+    }
+    if(!touch_input_enabled.load(std::memory_order_acquire)){
+      down=false;
+      vTaskDelay(pdMS_TO_TICKS(20));
       continue;
     }
     bool pressed=false; int x=0,y=0;
@@ -944,23 +950,24 @@ static void fetch_task(void*){
     vTaskDelay(pdMS_TO_TICKS(100));
   }
 }
-// No cross-variant-safe ESP32 wake GPIO for the AXP IRQ has been verified.
-// Stop workers and Wi-Fi, then use 250 ms timer-sliced light sleep and poll only
-// latched INTSTS2 bit 3 between slices. RAM, framebuffer, and task state survive.
-static bool enter_screen_off_standby(NetworkPortal& network){
+// Full battery standby. No cross-variant-safe ESP32 wake GPIO for the AXP IRQ
+// has been verified, so workers and Wi-Fi stop while timer-sliced light sleep
+// polls latched INTSTS2 bit 3. USB power uses display-only standby in app_main.
+static bool enter_full_standby(NetworkPortal& network){
   if(network.IsOtaArmed()||network.IsOtaBusy()){
-    ESP_LOGW(TAG,"POWER standby deferred while manual OTA is armed or active");
+    ESP_LOGW(TAG,"full POWER standby deferred while manual OTA is armed or active");
     return false;
   }
 #if !BOARD_IS_V1
   if(!PauseV2AutomaticOtaForStandby(20000)){
-    ESP_LOGW(TAG,"POWER standby deferred while automatic OTA is active");
+    ESP_LOGW(TAG,"full POWER standby deferred while automatic OTA is active");
     return false;
   }
 #endif
-  set_screen(false);
+  touch_input_enabled.store(false,std::memory_order_release);
   tap_x.store(-1,std::memory_order_release);
   tap_y.store(-1,std::memory_order_relaxed);
+  set_screen(false);
   xEventGroupClearBits(standby_events,FEED_IDLE|TOUCH_IDLE);
   xEventGroupSetBits(standby_events,STANDBY_REQUEST);
   const EventBits_t idle=xEventGroupWaitBits(
@@ -969,13 +976,14 @@ static bool enter_screen_off_standby(NetworkPortal& network){
     ESP_LOGE(TAG,"standby aborted: worker pause timeout bits=0x%lx",(unsigned long)idle);
     xEventGroupClearBits(standby_events,STANDBY_REQUEST);
     set_screen(true);
+    touch_input_enabled.store(true,std::memory_order_release);
 #if !BOARD_IS_V1
     ResumeV2AutomaticOtaAfterStandby();
 #endif
     return false;
   }
   network.Suspend();
-  ESP_LOGI(TAG,"standby entered by POWER: panel/feed/touch/Wi-Fi off; 250ms AXP 0x49 polling");
+  ESP_LOGI(TAG,"battery full standby entered by POWER: panel/feed/touch/Wi-Fi off; 250ms AXP 0x49 polling");
   bool power_wake=false;
   while(!power_wake){
     ESP_ERROR_CHECK(esp_sleep_enable_timer_wakeup(kPowerPollSliceUs));
@@ -990,10 +998,13 @@ static bool enter_screen_off_standby(NetworkPortal& network){
   xEventGroupClearBits(standby_events,STANDBY_REQUEST);
   set_screen(true);
   draw_locked();
+  tap_x.store(-1,std::memory_order_release);
+  tap_y.store(-1,std::memory_order_relaxed);
+  touch_input_enabled.store(true,std::memory_order_release);
 #if !BOARD_IS_V1
   ResumeV2AutomaticOtaAfterStandby();
 #endif
-  ESP_LOGI(TAG,"standby wake by POWER: Wi-Fi/tasks resumed and fresh fetch requested");
+  ESP_LOGI(TAG,"battery full standby wake by POWER: Wi-Fi/tasks resumed and fresh fetch requested");
   return true;
 }
 extern "C" void app_main(){
@@ -1044,8 +1055,29 @@ extern "C" void app_main(){
     if(now-last_pkey>=100){
       last_pkey=now;
       if(axp_pkey_short()){
-        ESP_LOGI(TAG,"POWER short: entering screen standby");
-        enter_screen_off_standby(network);
+        if(!screen_on){
+          ESP_LOGI(TAG,"POWER short: waking USB display-only standby");
+          set_screen(true);
+          draw_locked();
+          tap_x.store(-1,std::memory_order_release);
+          tap_y.store(-1,std::memory_order_relaxed);
+          touch_input_enabled.store(true,std::memory_order_release);
+        } else {
+          // Refresh VBUS at the button event instead of relying on the up-to-five-
+          // second-old top-bar sample. Battery presence never overrides VBUS.
+          update_battery();
+          const PowerStandbyMode mode=power_standby_mode(g_batt.vbus,g_batt.present);
+          if(mode==PowerStandbyMode::kDisplayOnly){
+            ESP_LOGI(TAG,"POWER short: entering USB display-only standby; Wi-Fi/feed/background tasks remain active");
+            touch_input_enabled.store(false,std::memory_order_release);
+            tap_x.store(-1,std::memory_order_release);
+            tap_y.store(-1,std::memory_order_relaxed);
+            set_screen(false);
+          } else {
+            ESP_LOGI(TAG,"POWER short: entering battery full standby");
+            enter_full_standby(network);
+          }
+        }
         now=esp_timer_get_time()/1000;
         last_draw=last_batt=last_pkey=now;
         shown_portal=network.IsPortalActive();
@@ -1074,7 +1106,7 @@ extern "C" void app_main(){
       if(action==BootReleaseAction::kTogglePrivacy){
         const bool enabled=toggle_privacy();need_draw=screen_on;
         ESP_LOGI(TAG,"BOOT long release: privacy %s",enabled?"ON":"OFF");
-      } else if(action==BootReleaseAction::kBottomAction&&!portal&&screen_on){
+      } else if(action==BootReleaseAction::kBottomAction&&!portal){
         activate_bottom_action(selected_chart,detail);need_draw=true;
         ESP_LOGI(TAG,"BOOT short: blue bottom action");
       }

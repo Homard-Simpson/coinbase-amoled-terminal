@@ -4,6 +4,11 @@
 #include "../main/ui_helpers.h"
 
 int main() {
+  constexpr TopBarAnchors top_bar = top_bar_anchors(368);
+  static_assert(top_bar.left == 24 && top_bar.right == 344);
+  static_assert(top_bar.left == 368 - top_bar.right);
+  static_assert(top_bar.left > 16);
+
   assert(std::fabs(chart_level_value(80.0, 120.0, 0, 4) - 120.0) < 1e-12);
   assert(std::fabs(chart_level_value(80.0, 120.0, 2, 4) - 100.0) < 1e-12);
   assert(std::fabs(chart_level_value(80.0, 120.0, 4, 4) - 80.0) < 1e-12);

@@ -8,6 +8,11 @@ enum class BootReleaseAction {
   kNone,
 };
 
+enum class PowerStandbyMode {
+  kFull,
+  kDisplayOnly,
+};
+
 constexpr uint64_t kBootPrivacyHoldMs = 800;
 constexpr uint64_t kBootOtaHoldMs = 10000;
 constexpr uint64_t kPowerPollSliceUs = 250000;
@@ -20,6 +25,15 @@ constexpr BootReleaseAction boot_release_action(uint64_t held_ms, bool ota_was_a
 
 constexpr bool boot_should_arm_ota(bool button_down, uint64_t held_ms, bool already_handled) {
   return button_down && !already_handled && held_ms >= kBootOtaHoldMs;
+}
+
+// VBUS alone selects display-only standby. Battery presence is intentionally
+// irrelevant so charging/full batteries and USB operation without a battery
+// all keep networking and background tasks alive.
+constexpr PowerStandbyMode power_standby_mode(bool vbus_present,
+                                              bool /*battery_present*/) {
+  return vbus_present ? PowerStandbyMode::kDisplayOnly
+                      : PowerStandbyMode::kFull;
 }
 
 // Runtime AXP writes are limited to enabling and consuming PWRKEY short press.

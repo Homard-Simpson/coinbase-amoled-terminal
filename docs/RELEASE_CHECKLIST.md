@@ -90,9 +90,9 @@ board variants, the bridge, documentation, and publication artifacts pass review
 - [ ] FT5x06-family touch works across the screen.
 - [ ] Wi-Fi, HTTPS feed, stale/offline state, and reconnect pass.
 - [ ] Wired recovery and OTA rollback path are available.
-- [ ] POWER short standby/wake; BOOT short blue action; BOOT 0.8–<10 second
-  privacy toggle; and continuous 10-second OTA arming match the documented
-  production contract.
+- [ ] POWER short enters/wakes display-only standby with USB/VBUS and full
+  standby without VBUS; BOOT short blue action, BOOT 0.8–<10 second privacy
+  toggle, and continuous 10-second OTA arming remain unchanged.
 - [ ] Captive portal completes with a synthetic P-256 view-only test transport and
   clears the one-time onboarding partition after success.
 
@@ -103,14 +103,15 @@ board variants, the bridge, documentation, and publication artifacts pass review
 - [ ] CST816S/CST820-family touch works across the screen.
 - [ ] Wi-Fi, HTTPS feed, stale/offline state, and reconnect pass.
 - [ ] Wired recovery and OTA rollback path are available.
-- [ ] POWER short standby/wake; BOOT short blue action; BOOT 0.8–<10 second
-  privacy toggle; and continuous 10-second OTA arming match the documented
-  production contract.
+- [ ] POWER short enters/wakes display-only standby with USB/VBUS and full
+  standby without VBUS; BOOT short blue action, BOOT 0.8–<10 second privacy
+  toggle, and continuous 10-second OTA arming remain unchanged.
 - [ ] Confirm V2 performs only the shared PWRKEY IRQ writes at runtime and no
   V1-only AXP2101 rail write before, during, or after onboarding.
 - [ ] Verify a signed strictly newer V2 update installs, same/older/prerelease or
-  bad-signature artifacts fail closed, rollback works, and POWER standby cannot
-  interrupt an active automatic update.
+  bad-signature artifacts fail closed, rollback works, battery-only full standby
+  cannot interrupt an active automatic update, and USB display-only standby
+  leaves the updater running.
 - [ ] Captive portal completes with a synthetic P-256 view-only test transport and
   clears the one-time onboarding partition after success.
 

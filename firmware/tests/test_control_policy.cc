@@ -13,6 +13,13 @@ int main() {
   assert(!boot_should_arm_ota(false, 12000, false));
   assert(!boot_should_arm_ota(true, 12000, true));
 
+  // Battery-only operation retains full standby. Any valid VBUS source selects
+  // display-only standby, independent of whether a battery is fitted.
+  assert(power_standby_mode(false, true) == PowerStandbyMode::kFull);
+  assert(power_standby_mode(false, false) == PowerStandbyMode::kFull);
+  assert(power_standby_mode(true, true) == PowerStandbyMode::kDisplayOnly);
+  assert(power_standby_mode(true, false) == PowerStandbyMode::kDisplayOnly);
+
   // Both touch and BOOT call this same action: chart -> PRICES, then
   // PRICES <-> POSITIONS.
   int chart = 3;

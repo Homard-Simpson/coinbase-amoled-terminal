@@ -98,8 +98,10 @@ Run these on both revisions before marking a release supported:
 - boot log identifies the intended variant;
 - panel initializes without reset loops, corruption, or unexpected blanking;
 - brightness and screen on/off behavior work;
-- POWER short press enters/wakes standby with panel, Wi-Fi, feed, and touch
-  paused/resumed;
+- with USB/VBUS present, POWER short press enters/wakes display-only standby:
+  panel and touch input stop while Wi-Fi, feed, and V2 updates continue;
+- without VBUS, POWER short press enters/wakes full standby with panel, Wi-Fi,
+  feed, and touch paused/resumed;
 - BOOT short activates the blue bottom action, 0.8–<10 seconds toggles privacy,
   and uninterrupted 10 seconds arms manual OTA without a privacy toggle;
 - touch coordinates reach every intended control region;
@@ -108,8 +110,8 @@ Run these on both revisions before marking a release supported:
 - malformed and stale feeds show safe error states;
 - background refresh does not starve touch input;
 - OTA rollback or wired recovery is available; and
-- V2 signed automatic OTA does not race POWER standby; V1 has no automatic
-  updater; and
+- V2 signed automatic OTA does not race battery-only full standby and continues
+  through USB display-only standby; V1 has no automatic updater; and
 - no credential, token, or unique hardware identifier appears in logs/artifacts.
 
 Record only generic pass/fail results in public release notes. Keep serial numbers,

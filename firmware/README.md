@@ -25,10 +25,12 @@ Check the seller listing, packaging, board marking, or Waveshare factory-example
 - Open positions are taller, color-accented, and show an emphasized live price.
 - Tap an asset for an expanded OHLCV chart. Candle body width scales with volume; no separate volume histogram is used.
 - Entry and live-price guide lines, subtle light-blue left-side chart levels, list sparklines, and closed-today rows.
-- A single top row with battery/charge state at left and bridge-local current time at right in 12-hour AM/PM format.
+- A single top row with battery/charge state and bridge-local 12-hour time on symmetric 24-pixel left/right anchors.
 - Dedicated 10 ms touch task so network requests and frame transfers do not drop taps.
-- **Short POWER/PWRKEY press:** enter standby; a second POWER press wakes. The
-  panel, feed/touch workers, and Wi-Fi pause while RAM/UI state is retained.
+- **Short POWER/PWRKEY press:** enter standby; a second POWER press wakes. When
+  VBUS is present, only the panel and touch input stop; Wi-Fi, feed refresh, and
+  the signed V2 updater remain active. Without VBUS, full standby pauses the
+  panel, feed/touch workers, and Wi-Fi while RAM/UI state is retained.
 - **Short BOOT press:** activate the current blue bottom action (toggle Prices /
   Positions, or leave a chart).
 - **BOOT release after 0.8 to under 10 seconds:** toggle privacy mode.
@@ -45,7 +47,7 @@ Check the seller listing, packaging, board marking, or Waveshare factory-example
 - HTTPS uses the ESP-IDF certificate bundle. Plain HTTP is accepted only for RFC1918, link-local, loopback, CGNAT/tailnet, `.local`, `.lan`, `.home.arpa`, `.internal`, or single-label LAN hosts.
 - Feed bodies are capped at 192 KiB. Candle storage is capped at 36 per symbol; closed-today storage is capped at 20 rows.
 - The entire response is rejected unless `read_only` is the JSON boolean `true`. Missing, `false`, string, or numeric values fail closed and do not replace the last trusted state.
-- Manual OTA requires physical presence plus a six-digit one-time code. V2 also checks the official latest-release endpoint in the background and accepts only a strictly newer stable V2 application whose SHA-256 is bound to a production-ready Ed25519-signed manifest. POWER standby takes an updater gate first, so Wi-Fi cannot be stopped during an authenticated inactive-slot write; manual-OTA arming likewise defers standby. Both update paths use dual slots and ESP-IDF rollback. This protects network updates, but it is not a substitute for hardware Secure Boot against a physical attacker.
+- Manual OTA requires physical presence plus a six-digit one-time code. V2 also checks the official latest-release endpoint in the background and accepts only a strictly newer stable V2 application whose SHA-256 is bound to a production-ready Ed25519-signed manifest. Battery-only full standby takes an updater gate first, so Wi-Fi cannot be stopped during an authenticated inactive-slot write; manual-OTA arming likewise defers full standby. USB display-only standby leaves networking and the updater running. Both update paths use dual slots and ESP-IDF rollback. This protects network updates, but it is not a substitute for hardware Secure Boot against a physical attacker.
 - Runtime AXP2101 writes on both boards are restricted to enabling and consuming
   the physical PWRKEY short-press interrupt (`0x41` bit 3 and `0x49 = 0x08`).
   V1-only rail sequencing remains compile-time isolated from V2.
@@ -156,7 +158,7 @@ Compact candles use `[timestamp, open, high, low, close, volume]`. Object candle
 
 ### Automatic V2 updates
 
-After a randomized startup delay, V2 checks the official GitHub latest-release endpoint every six hours. It installs only when the release manifest and detached Ed25519 signature authenticate under the pinned release key, all production/control/V2-hardware readiness flags are true, the release is a strictly newer stable semantic version, and the downloaded V2 application matches the signed size, SHA-256, project, board suffix, and app version. Redirects are permitted only in this signed-download path; an altered payload cannot pass the pinned signature and digest checks. Failed checks or transfers leave the current slot selected, and ESP-IDF rollback remains enabled. POWER standby waits for the updater gate and stays awake rather than interrupting an active check/write.
+After a randomized startup delay, V2 checks the official GitHub latest-release endpoint every six hours. It installs only when the release manifest and detached Ed25519 signature authenticate under the pinned release key, all production/control/V2-hardware readiness flags are true, the release is a strictly newer stable semantic version, and the downloaded V2 application matches the signed size, SHA-256, project, board suffix, and app version. Redirects are permitted only in this signed-download path; an altered payload cannot pass the pinned signature and digest checks. Failed checks or transfers leave the current slot selected, and ESP-IDF rollback remains enabled. Battery-only full standby waits for the updater gate and stays awake rather than interrupting an active check/write. USB display-only standby does not stop Wi-Fi or the updater.
 
 V1 does not compile or run the automatic updater. Prereleases and same/older versions are never installed automatically.
 

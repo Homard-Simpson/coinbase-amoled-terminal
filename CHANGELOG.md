@@ -12,6 +12,11 @@ public releases begin.
 
 - Reduced the token-chart price-axis gutter and widened the plot area on both V1
   and V2 without moving its right edge.
+- Split POWER standby by live VBUS state: USB-powered devices turn off only the
+  panel and touch input while networking, feed refresh, and signed V2 OTA remain
+  active; battery-only devices retain coordinated full standby.
+- Moved the battery and clock to symmetric 24-pixel top-bar anchors while
+  preserving every BOOT duration and action.
 
 ## [2.0.0] - 2026-08-02
 

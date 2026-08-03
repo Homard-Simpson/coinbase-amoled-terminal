@@ -24,8 +24,9 @@ this threat model is no longer sufficient.
    hardware revision.
 9. Automatic firmware updates cannot install an unauthenticated, cross-board,
    same/older, prerelease, truncated, or digest-mismatched application.
-10. POWER standby cannot interrupt a V2 automatic OTA write or reuse BOOT for an
-    unrelated power action.
+10. Battery-only full standby cannot interrupt a V2 automatic OTA write, USB
+    display-only standby cannot stop background updates, and neither mode reuses
+    BOOT for an unrelated power action.
 
 ## Assets
 
@@ -178,10 +179,11 @@ write.
 **Controls:** V2 pins an Ed25519 manifest key and requires production/control/V2
 hardware evidence, a strictly newer stable semantic version, exact project and
 `-v2` identity, signed size and SHA-256, complete ESP-IDF image validation,
-dual-slot selection, and rollback. The automatic updater holds a standby gate
-through metadata checks and image writing; POWER standby waits or stays awake.
-Manual OTA remains physically armed and defers standby while its window is open.
-V1 has no automatic updater.
+dual-slot selection, and rollback. The automatic updater holds a full-standby
+gate through metadata checks and image writing; battery-only full standby waits
+or stays awake. USB display-only standby leaves Wi-Fi and the updater running.
+Manual OTA remains physically armed and defers full standby while its window is
+open. V1 has no automatic updater.
 
 **Residual risk:** baseline boards do not enable Secure Boot or flash encryption,
 so physical possession can replace firmware. GitHub, CI, the signing key, and the

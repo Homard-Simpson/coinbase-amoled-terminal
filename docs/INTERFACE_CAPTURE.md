@@ -2,7 +2,7 @@
 
 The gallery images are **not mockups**. They are lossless conversions of raw
 368 × 448 RGB565 frames emitted by the current production firmware renderer on
-2026-08-02.
+2026-08-03.
 
 ## Capture method
 
@@ -20,16 +20,18 @@ The gallery images are **not mockups**. They are lossless conversions of raw
    PNG without scaling, interpolation, overlays, or retouching.
 
 The captured production `main.cc` has SHA-256
-`290171f2dd94ff71eed190efa5e74de4977a39d63e860ef4b9d2b45de712cf16`.
+`08dc92ac17a97c8dd1862ad6367e136d2df69653202122c5db043280b0dd30ba`.
 The mirrored `draw()` include has SHA-256
-`2836da3f7aa036d3b799030e0fe079537edb57b90f10f158eaa69ee4b6a33e32`.
-The production font, BB20, and key-level headers are preserved beside the harness
-and have SHA-256 values recorded below.
+`f160866b0eb06059025c412cda25a3ae45340c48bc463260fc007cb6400ddbaa`.
+The production UI helper is imported directly by the harness; its font, BB20,
+and key-level mirrors are retained with the capture source. Their SHA-256 values
+are recorded below.
 
 | Capture input | SHA-256 |
 | --- | --- |
 | `renderer_capture.cc` | `5bf6c1f21e10a71e6c52d0c31d80ee09bfe81492920bf959b348eda50ef84923` |
 | `capture.py` | `a04097d0b0548b1450c060fe99eded91cd364c98386b59977a74621f87dcc085` |
+| `ui_helpers.h` | `353cc81a399ba4a6151917f5d1a5a85d751c2b90232c8da85fee844c59e7cf8f` |
 | `glcdfont.h` | `bd6d60ecb9cc350a83f209d7c62de2fe5f6ce3402d5598cde2988b5b44e83e02` |
 | `bollinger_bands.h` | `43732fa011093af0ba34256133798c199d69e4b533d49a610ddd18d07603eb55` |
 | `key_levels.h` | `aceb891059eb3d38be3fafc76b77d165e4dce40c9c4bc527c6b8d1ffd1ec8de5` |
@@ -55,9 +57,9 @@ snapshot and fixed synthetic display time make every frame deterministic.
 
 | PNG | Raw RGB565 SHA-256 | PNG SHA-256 |
 | --- | --- | --- |
-| `prices-page.png` | `13cbe2461cf449f785a41c18a2e648b39f5f0a36290d4d87d5fa4cd0b98d4f55` | `ce56c40c3c8e231f513e8a4206dc4cf14603e02e3bb0adfa449cf9ce655fd92d` |
-| `positions-privacy-page.png` | `d5c2468c2d99ecc72acc741a38381617b394c6df82414e34e9037838a224a489` | `466ef924068f61fdfb2714dd097f3efee2d0eb83f2d4e7251376321b72511322` |
-| `btc-chart-bb20-levels.png` | `2e47b3a27ff190b3d7813dce5a227a44d4e4e9823756bb0769162eca86e5df11` | `fc5efcbbf3c704c16ad4d2e1486fcd97fdf87fb069f8259255a50d70d9eed592` |
+| `prices-page.png` | `7808a75a581dfccd0c025f28278f9f1b77544bcc1134b586d9379dc3650fb86b` | `cd99d4d58dd2752c26c75a0295d7648ae3896fb6d1d7ad082406ffee539c56a4` |
+| `positions-privacy-page.png` | `3069827e4a86148a37ad81caa4a016c6b7eef0c0e5b43bb65cbef17869428e35` | `4ba610fad706c4338a33463554d14a3cb436c39377e32b72b11854b91e849ec8` |
+| `btc-chart-bb20-levels.png` | `3bf6a4c7392097242ffa9ac8907b99aac0611cc1c7f9d21a2ab1a4d9e289ff0c` | `ac0794f7d239cf2d4479707dc64efed67c3992b1719ff61beaee9a542a4d72d7` |
 
 The versioned `*-v2.0.0.png` files used by the README are byte-identical copies
 of the corresponding generated files above, and the reproduction check verifies

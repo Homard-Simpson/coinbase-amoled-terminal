@@ -103,15 +103,18 @@ The firmware:
 - renders last-known-good data with clear stale/offline states, bridge-local
   fixed-width 12-hour time, privacy mode, and muted chart-axis prices;
 - selects V1 or V2 hardware support at build time;
-- maps POWER short press to coordinated standby/wake and BOOT to the current blue
+- maps POWER short press to VBUS-aware standby/wake and BOOT to the current blue
   action, privacy, or manual OTA based on exact hold duration; and
 - on V2 only, periodically authenticates the production-ready latest release with
   the pinned Ed25519 manifest key and installs only a strictly newer stable V2
   application after signed size, SHA-256, project, version, and board checks.
 
-POWER standby takes the V2 updater gate before pausing Wi-Fi, feed, touch, and
-the panel. It waits or remains awake instead of interrupting an inactive-slot
-write. V1 does not compile the automatic updater.
+POWER samples live AXP2101 VBUS state at the button event. With VBUS present it
+turns off only the panel and touch input, so Wi-Fi, feed refresh, portal state, and
+signed V2 OTA continue. Without VBUS it takes the V2 updater gate before pausing
+Wi-Fi, feed, touch, and the panel for full standby; it waits or remains awake
+instead of interrupting an inactive-slot write. Battery presence never overrides
+VBUS. V1 does not compile the automatic updater.
 
 It never receives a Coinbase API key and has no code path for order or transfer
 operations.

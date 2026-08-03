@@ -17,7 +17,8 @@ static void draw(){
     return;
   }
   uint64_t now=esp_timer_get_time()/1000; bool stale=!last_ok_ms||now-last_ok_ms>STALE_MS;
-  draw_battery(16,10);
+  constexpr TopBarAnchors top_bar=top_bar_anchors(W);
+  draw_battery(top_bar.left,10);
   bool feed_problem=feed_status!=ST_UPDATED&&feed_status!=ST_STARTING;
   char status[24]{};
   if(stale||!wifi_up||feed_problem){
@@ -31,7 +32,7 @@ static void draw(){
     else snprintf(status,sizeof(status),"FEED ERR");
   } else if(privacy_mode)snprintf(status,sizeof(status),"PRIVATE");
   if(status[0])text_center(120,132,12,status,AMBER,2);
-  text_right(352,12,display_time.c_str(),AXIS_BLUE,2);
+  text_right(top_bar.right,12,display_time.c_str(),AXIS_BLUE,2);
   int top=58;
   if(selected_chart>=0){
     auto&a=assets[selected_chart];
