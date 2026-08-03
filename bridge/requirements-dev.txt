@@ -1,4 +1,4 @@
 # Install the project and run the stdlib unittest suite; no extra test packages
 # are required to run the tests. `ruff` is optional and only used for linting.
 -r requirements.txt
-ruff>=0.6,<1.0
+ruff>=0.16.1,<1.0
