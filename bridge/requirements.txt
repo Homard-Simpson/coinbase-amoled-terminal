@@ -1,2 +1,2 @@
 # Runtime dependency. The rest of the service uses Python's standard library.
-cryptography>=42.0.0,<49
+cryptography>=50.0.1,<51
